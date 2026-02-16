@@ -77,7 +77,26 @@ BOOL CreateTrampolineFunction(PTRAMPOLINE ct)
 
         copySize = HDE_DISASM((LPVOID)pOldInst, &hs);
         if (hs.flags & F_ERROR)
-            return FALSE;
+        {
+            // Check for ENDBR64 (F3 0F 1E FA) / ENDBR32 (F3 0F 1E FB).
+            // These Intel CET instructions are effectively NOPs on non-CET
+            // hardware and are safe to copy verbatim into the trampoline.
+            // Older HDE versions may flag them as errors because the opcode
+            // tables predate the CET extension.
+            LPBYTE pBytes = (LPBYTE)pOldInst;
+            if (pBytes[0] == 0xF3 && pBytes[1] == 0x0F &&
+                pBytes[2] == 0x1E && (pBytes[3] == 0xFA || pBytes[3] == 0xFB))
+            {
+                copySize = 4;
+                memset(&hs, 0, sizeof(hs));
+                hs.len = 4;
+                // Fall through to copy the ENDBR instruction as-is.
+            }
+            else
+            {
+                return FALSE;
+            }
+        }
 
         pCopySrc = (LPVOID)pOldInst;
 

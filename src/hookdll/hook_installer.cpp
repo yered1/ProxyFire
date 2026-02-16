@@ -13,12 +13,89 @@
 
 #include <MinHook.h>
 
+#include <cstring>
+
 #ifdef _WIN32
 #include <windows.h>
 #include <winsock2.h>
 #include <ws2tcpip.h>
 
 namespace proxyfire {
+
+/*
+ * Follow JMP chains and skip non-essential prologue instructions
+ * to find the actual function body that MinHook can trampoline.
+ *
+ * On modern Windows, some API functions start with CET ENDBR
+ * instructions or are thin JMP stubs (forwarded exports, CFG
+ * dispatch, or already-applied hooks from security software).
+ * MinHook's trampoline builder can fail on these prologues.
+ *
+ * This function walks through such indirection so we can retry
+ * MH_CreateHook at the resolved "real" address.
+ *
+ * Returns the resolved address, or nullptr if no resolution was
+ * possible (i.e. the address from GetProcAddress is already the
+ * real body, or the module/function was not found).
+ */
+static LPVOID resolve_function(const wchar_t* module, const char* funcName) {
+    HMODULE hMod = GetModuleHandleW(module);
+    if (!hMod) return nullptr;
+
+    FARPROC pProc = GetProcAddress(hMod, funcName);
+    if (!pProc) return nullptr;
+
+    LPBYTE p = (LPBYTE)pProc;
+    LPBYTE start = p;
+
+    for (int depth = 0; depth < 8; depth++) {
+        /* Skip ENDBR64 (F3 0F 1E FA) / ENDBR32 (F3 0F 1E FB) */
+        if (p[0] == 0xF3 && p[1] == 0x0F && p[2] == 0x1E &&
+            (p[3] == 0xFA || p[3] == 0xFB)) {
+            p += 4;
+            continue;
+        }
+
+        /* JMP rel32 (E9 xx xx xx xx) */
+        if (p[0] == 0xE9) {
+            INT32 offset;
+            memcpy(&offset, p + 1, sizeof(offset));
+            p = p + 5 + offset;
+            continue;
+        }
+
+        /* JMP rel8 (EB xx) */
+        if (p[0] == 0xEB) {
+            INT8 offset = (INT8)p[1];
+            p = p + 2 + offset;
+            continue;
+        }
+
+#if defined(_M_X64) || defined(__x86_64__)
+        /* x64: JMP [rip+disp32] (FF 25 xx xx xx xx) */
+        if (p[0] == 0xFF && p[1] == 0x25) {
+            INT32 disp;
+            memcpy(&disp, p + 2, sizeof(disp));
+            p = *(LPBYTE*)(p + 6 + disp);
+            continue;
+        }
+#else
+        /* x86: JMP [addr32] (FF 25 xx xx xx xx) */
+        if (p[0] == 0xFF && p[1] == 0x25) {
+            LPBYTE* target;
+            memcpy(&target, p + 2, sizeof(target));
+            p = *target;
+            continue;
+        }
+#endif
+
+        break;  /* No more indirection */
+    }
+
+    /* Only return a result if we actually resolved to a different address */
+    if (p == start) return nullptr;
+    return (LPVOID)p;
+}
 
 struct HookEntry {
     const wchar_t* module;
@@ -215,6 +292,23 @@ bool install_all_hooks() {
             g_hooks[i].detour,
             g_hooks[i].original
         );
+
+        /*
+         * If the trampoline builder failed, try to resolve the function
+         * through any JMP/ENDBR chains and hook at the real body instead.
+         * This handles functions that are thin stubs, have been pre-hooked
+         * by security software, or start with CET ENDBR instructions that
+         * confuse the disassembler.
+         */
+        if (status == MH_ERROR_UNSUPPORTED_FUNCTION) {
+            LPVOID resolved = resolve_function(g_hooks[i].module, g_hooks[i].funcName);
+            if (resolved) {
+                ipc_client_log(PF_LOG_DEBUG,
+                    "Retrying %s at resolved address (followed JMP/ENDBR chain)",
+                    g_hooks[i].description);
+                status = MH_CreateHook(resolved, g_hooks[i].detour, g_hooks[i].original);
+            }
+        }
 
         if (status != MH_OK && status != MH_ERROR_MODULE_NOT_FOUND &&
             status != MH_ERROR_FUNCTION_NOT_FOUND) {
