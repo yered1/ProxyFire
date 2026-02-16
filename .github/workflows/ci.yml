@@ -1,0 +1,41 @@
+name: CI
+
+on:
+  push:
+    branches: [main, master]
+  pull_request:
+    branches: [main, master]
+
+jobs:
+  build:
+    runs-on: windows-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        arch: [x64, Win32]
+        config: [Release, Debug]
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Configure CMake (${{ matrix.arch }} ${{ matrix.config }})
+        run: cmake -B build -A ${{ matrix.arch }}
+
+      - name: Build
+        run: cmake --build build --config ${{ matrix.config }} --parallel
+
+      - name: List build artifacts
+        shell: pwsh
+        run: |
+          Get-ChildItem -Recurse build -Include *.exe,*.dll,*.lib,*.pdb |
+            ForEach-Object { $_.FullName.Replace("$PWD\", "") }
+
+      - name: Upload artifacts
+        if: matrix.config == 'Release'
+        uses: actions/upload-artifact@v4
+        with:
+          name: proxyfire-${{ matrix.arch }}
+          path: |
+            build/src/launcher/${{ matrix.config }}/proxyfire.exe
+            build/src/hookdll/${{ matrix.config }}/proxyfire_hook*.dll
+          if-no-files-found: error
