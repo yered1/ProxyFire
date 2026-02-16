@@ -32,8 +32,22 @@ int (WSAAPI *Original_getaddrinfo)(const char*, const char*,
 int (WSAAPI *Original_GetAddrInfoW)(const wchar_t*, const wchar_t*,
      const ADDRINFOW*, ADDRINFOW**) = nullptr;
 struct hostent* (WSAAPI *Original_gethostbyname)(const char*) = nullptr;
+int (WSAAPI *Original_GetAddrInfoExW)(const wchar_t*, const wchar_t*,
+     DWORD, LPGUID, const ADDRINFOEXW*, PADDRINFOEXW*, struct timeval*,
+     LPOVERLAPPED, LPLOOKUPSERVICE_COMPLETION_ROUTINE, LPHANDLE) = nullptr;
 
 namespace proxyfire {
+
+/*
+ * Check if a hostname is localhost or a localhost variant.
+ */
+static bool is_localhost(const char* name) {
+    if (!name) return false;
+    if (strcmp(name, "localhost") == 0) return true;
+    if (strcmp(name, "localhost.") == 0) return true;
+    if (_stricmp(name, "localhost") == 0) return true;
+    return false;
+}
 
 /*
  * Check if a string is a numeric IP address (not a hostname).
@@ -58,15 +72,12 @@ static bool is_numeric_address_w(const wchar_t* str) {
 
 /*
  * Build a synthetic addrinfo result with a fake IP.
- * We allocate everything in a single block so freeaddrinfo can free it.
+ * Uses HeapAlloc so that freeaddrinfo (which uses HeapFree) can free it.
  */
 static struct addrinfo* build_fake_addrinfo(uint32_t fake_ip_net, const char* service) {
-    /*
-     * Allocate a single block for: addrinfo + sockaddr_in + canonical name
-     * This way freeaddrinfo (which calls free()) can handle it.
-     */
+    HANDLE heap = GetProcessHeap();
     size_t total = sizeof(struct addrinfo) + sizeof(struct sockaddr_in);
-    struct addrinfo* ai = (struct addrinfo*)calloc(1, total);
+    struct addrinfo* ai = (struct addrinfo*)HeapAlloc(heap, HEAP_ZERO_MEMORY, total);
     if (!ai) return nullptr;
 
     struct sockaddr_in* sa = (struct sockaddr_in*)(ai + 1);
@@ -90,13 +101,44 @@ static struct addrinfo* build_fake_addrinfo(uint32_t fake_ip_net, const char* se
 
 /*
  * Build a synthetic ADDRINFOW result with a fake IP.
+ * Uses HeapAlloc so that FreeAddrInfoW (which uses HeapFree) can free it.
  */
 static ADDRINFOW* build_fake_addrinfow(uint32_t fake_ip_net, const wchar_t* service) {
+    HANDLE heap = GetProcessHeap();
     size_t total = sizeof(ADDRINFOW) + sizeof(struct sockaddr_in);
-    ADDRINFOW* ai = (ADDRINFOW*)calloc(1, total);
+    ADDRINFOW* ai = (ADDRINFOW*)HeapAlloc(heap, HEAP_ZERO_MEMORY, total);
     if (!ai) return nullptr;
 
     struct sockaddr_in* sa = (struct sockaddr_in*)(ai + 1);
+
+    sa->sin_family = AF_INET;
+    sa->sin_addr.s_addr = fake_ip_net;
+    if (service) {
+        sa->sin_port = htons((uint16_t)_wtoi(service));
+    }
+
+    ai->ai_family = AF_INET;
+    ai->ai_socktype = SOCK_STREAM;
+    ai->ai_protocol = IPPROTO_TCP;
+    ai->ai_addrlen = sizeof(struct sockaddr_in);
+    ai->ai_addr = (struct sockaddr*)sa;
+    ai->ai_next = nullptr;
+    ai->ai_canonname = nullptr;
+
+    return ai;
+}
+
+/*
+ * Build a synthetic ADDRINFOEXW result with a fake IP.
+ * Uses HeapAlloc so that FreeAddrInfoExW (which uses HeapFree) can free it.
+ */
+static ADDRINFOEXW* build_fake_addrinfoexw(uint32_t fake_ip_net, const wchar_t* service) {
+    HANDLE heap = GetProcessHeap();
+    size_t total = sizeof(ADDRINFOEXW) + sizeof(struct sockaddr_in);
+    ADDRINFOEXW* ai = (ADDRINFOEXW*)HeapAlloc(heap, HEAP_ZERO_MEMORY, total);
+    if (!ai) return nullptr;
+
+    struct sockaddr_in* sa = (struct sockaddr_in*)((char*)ai + sizeof(ADDRINFOEXW));
 
     sa->sin_family = AF_INET;
     sa->sin_addr.s_addr = fake_ip_net;
@@ -143,7 +185,12 @@ int WSAAPI Hooked_getaddrinfo(const char* pNodeName, const char* pServiceName,
     }
 
     /* Pass through for localhost */
-    if (strcmp(pNodeName, "localhost") == 0 || strcmp(pNodeName, "localhost.") == 0) {
+    if (is_localhost(pNodeName)) {
+        return Original_getaddrinfo(pNodeName, pServiceName, pHints, ppResult);
+    }
+
+    /* If caller explicitly requests IPv6 only, pass through (we can't fake IPv6) */
+    if (pHints && pHints->ai_family == AF_INET6) {
         return Original_getaddrinfo(pNodeName, pServiceName, pHints, ppResult);
     }
 
@@ -188,7 +235,12 @@ int WSAAPI Hooked_GetAddrInfoW(const wchar_t* pNodeName, const wchar_t* pService
     std::string narrow_name = to_narrow(std::wstring(pNodeName));
 
     /* Pass through for localhost */
-    if (narrow_name == "localhost" || narrow_name == "localhost.") {
+    if (is_localhost(narrow_name.c_str())) {
+        return Original_GetAddrInfoW(pNodeName, pServiceName, pHints, ppResult);
+    }
+
+    /* If caller explicitly requests IPv6 only, pass through */
+    if (pHints && pHints->ai_family == AF_INET6) {
         return Original_GetAddrInfoW(pNodeName, pServiceName, pHints, ppResult);
     }
 
@@ -226,7 +278,7 @@ struct hostent* WSAAPI Hooked_gethostbyname(const char* name) {
         return Original_gethostbyname(name);
     }
 
-    if (strcmp(name, "localhost") == 0) {
+    if (is_localhost(name)) {
         return Original_gethostbyname(name);
     }
 
@@ -255,6 +307,94 @@ struct hostent* WSAAPI Hooked_gethostbyname(const char* name) {
     tls_hostent.h_addr_list = tls_addr_list;
 
     return &tls_hostent;
+}
+
+/*
+ * Hooked GetAddrInfoExW() - Async DNS resolution
+ *
+ * Used by modern Windows apps (UWP, Edge, .NET Core) for async DNS.
+ * Supports both synchronous and overlapped (async) calls.
+ */
+int WSAAPI Hooked_GetAddrInfoExW(const wchar_t* pName, const wchar_t* pServiceName,
+                                  DWORD dwNameSpace, LPGUID lpNspId,
+                                  const ADDRINFOEXW* hints, PADDRINFOEXW* ppResult,
+                                  struct timeval* timeout, LPOVERLAPPED lpOverlapped,
+                                  LPLOOKUPSERVICE_COMPLETION_ROUTINE lpCompletionRoutine,
+                                  LPHANDLE lpNameHandle)
+{
+    if (!g_config.dns_leak_prevention) {
+        return Original_GetAddrInfoExW(pName, pServiceName, dwNameSpace, lpNspId,
+                                        hints, ppResult, timeout, lpOverlapped,
+                                        lpCompletionRoutine, lpNameHandle);
+    }
+
+    if (!pName || is_numeric_address_w(pName)) {
+        return Original_GetAddrInfoExW(pName, pServiceName, dwNameSpace, lpNspId,
+                                        hints, ppResult, timeout, lpOverlapped,
+                                        lpCompletionRoutine, lpNameHandle);
+    }
+
+    std::string narrow_name = to_narrow(std::wstring(pName));
+
+    if (is_localhost(narrow_name.c_str())) {
+        return Original_GetAddrInfoExW(pName, pServiceName, dwNameSpace, lpNspId,
+                                        hints, ppResult, timeout, lpOverlapped,
+                                        lpCompletionRoutine, lpNameHandle);
+    }
+
+    /* If caller explicitly requests IPv6 only, pass through */
+    if (hints && hints->ai_family == AF_INET6) {
+        return Original_GetAddrInfoExW(pName, pServiceName, dwNameSpace, lpNspId,
+                                        hints, ppResult, timeout, lpOverlapped,
+                                        lpCompletionRoutine, lpNameHandle);
+    }
+
+    uint32_t fake_ip = dns_faker_allocate(narrow_name.c_str());
+    if (fake_ip == 0) {
+        return Original_GetAddrInfoExW(pName, pServiceName, dwNameSpace, lpNspId,
+                                        hints, ppResult, timeout, lpOverlapped,
+                                        lpCompletionRoutine, lpNameHandle);
+    }
+
+    ipc_client_dns_register(fake_ip, narrow_name.c_str());
+
+    if (g_config.verbose) {
+        ipc_client_log(PF_LOG_DEBUG, "GetAddrInfoExW(%s) -> fake IP %s",
+                      narrow_name.c_str(), ip_to_string(fake_ip).c_str());
+    }
+
+    /* Build the synthetic result */
+    ADDRINFOEXW* result = build_fake_addrinfoexw(fake_ip, pServiceName);
+    if (!result) {
+        if (lpOverlapped) {
+            lpOverlapped->Internal = WSAENOMORE;
+            if (lpOverlapped->hEvent) SetEvent(lpOverlapped->hEvent);
+            if (lpCompletionRoutine) {
+                lpCompletionRoutine(WSAENOMORE, 0, lpOverlapped);
+            }
+            return WSA_IO_PENDING;
+        }
+        WSASetLastError(WSA_NOT_ENOUGH_MEMORY);
+        return SOCKET_ERROR;
+    }
+
+    *ppResult = result;
+
+    /* Handle async completion if overlapped was provided */
+    if (lpOverlapped) {
+        /* Signal synchronous completion: set Internal to NO_ERROR */
+        lpOverlapped->Internal = NO_ERROR;
+        lpOverlapped->InternalHigh = 0;
+        if (lpOverlapped->hEvent) {
+            SetEvent(lpOverlapped->hEvent);
+        }
+        if (lpCompletionRoutine) {
+            lpCompletionRoutine(NO_ERROR, 0, lpOverlapped);
+        }
+        /* Return NO_ERROR for synchronous completion (not WSA_IO_PENDING) */
+    }
+
+    return NO_ERROR;
 }
 
 } // namespace proxyfire

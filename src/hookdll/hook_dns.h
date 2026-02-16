@@ -20,6 +20,14 @@ int WSAAPI Hooked_GetAddrInfoW(const wchar_t* pNodeName, const wchar_t* pService
 
 struct hostent* WSAAPI Hooked_gethostbyname(const char* name);
 
+/* Async DNS resolution hook */
+int WSAAPI Hooked_GetAddrInfoExW(const wchar_t* pName, const wchar_t* pServiceName,
+                                  DWORD dwNameSpace, LPGUID lpNspId,
+                                  const ADDRINFOEXW* hints, PADDRINFOEXW* ppResult,
+                                  struct timeval* timeout, LPOVERLAPPED lpOverlapped,
+                                  LPLOOKUPSERVICE_COMPLETION_ROUTINE lpCompletionRoutine,
+                                  LPHANDLE lpNameHandle);
+
 } // namespace proxyfire
 
 #endif

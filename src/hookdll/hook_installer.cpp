@@ -24,6 +24,7 @@ struct HookEntry {
     LPVOID         detour;
     LPVOID*        original;
     const char*    description;
+    bool           critical;     /* If true, failure aborts initialization */
 };
 
 /* Original function pointers - defined in respective hook files */
@@ -33,6 +34,8 @@ extern int     (WSAAPI *Original_connect)(SOCKET, const struct sockaddr*, int);
 extern int     (WSAAPI *Original_WSAConnect)(SOCKET, const struct sockaddr*, int,
                 LPWSABUF, LPWSABUF, LPQOS, LPQOS);
 extern int     (WSAAPI *Original_closesocket)(SOCKET);
+extern int     (WSAAPI *Original_WSAIoctl)(SOCKET, DWORD, LPVOID, DWORD, LPVOID, DWORD,
+                LPDWORD, LPWSAOVERLAPPED, LPWSAOVERLAPPED_COMPLETION_ROUTINE);
 
 /* DNS hooks */
 extern int     (WSAAPI *Original_getaddrinfo)(const char*, const char*,
@@ -40,6 +43,9 @@ extern int     (WSAAPI *Original_getaddrinfo)(const char*, const char*,
 extern int     (WSAAPI *Original_GetAddrInfoW)(const wchar_t*, const wchar_t*,
                 const ADDRINFOW*, ADDRINFOW**);
 extern struct hostent* (WSAAPI *Original_gethostbyname)(const char*);
+extern int     (WSAAPI *Original_GetAddrInfoExW)(const wchar_t*, const wchar_t*,
+                DWORD, LPGUID, const ADDRINFOEXW*, PADDRINFOEXW*, struct timeval*,
+                LPOVERLAPPED, LPLOOKUPSERVICE_COMPLETION_ROUTINE, LPHANDLE);
 
 /* Process hooks */
 extern BOOL    (WINAPI *Original_CreateProcessW)(LPCWSTR, LPWSTR,
@@ -50,50 +56,62 @@ extern BOOL    (WINAPI *Original_CreateProcessA)(LPCSTR, LPSTR,
                 LPVOID, LPCSTR, LPSTARTUPINFOA, LPPROCESS_INFORMATION);
 
 static HookEntry g_hooks[] = {
-    /* Winsock connection hooks */
+    /* Winsock connection hooks - CRITICAL */
     {
         L"ws2_32.dll", "connect",
         (LPVOID)Hooked_connect, (LPVOID*)&Original_connect,
-        "connect()"
+        "connect()", true
     },
     {
         L"ws2_32.dll", "WSAConnect",
         (LPVOID)Hooked_WSAConnect, (LPVOID*)&Original_WSAConnect,
-        "WSAConnect()"
+        "WSAConnect()", true
     },
     {
         L"ws2_32.dll", "closesocket",
         (LPVOID)Hooked_closesocket, (LPVOID*)&Original_closesocket,
-        "closesocket()"
+        "closesocket()", true
+    },
+    /* WSAIoctl - needed to intercept ConnectEx function pointer requests */
+    {
+        L"ws2_32.dll", "WSAIoctl",
+        (LPVOID)Hooked_WSAIoctl, (LPVOID*)&Original_WSAIoctl,
+        "WSAIoctl()", false
     },
 
     /* DNS hooks */
     {
         L"ws2_32.dll", "getaddrinfo",
         (LPVOID)Hooked_getaddrinfo, (LPVOID*)&Original_getaddrinfo,
-        "getaddrinfo()"
+        "getaddrinfo()", false
     },
     {
         L"ws2_32.dll", "GetAddrInfoW",
         (LPVOID)Hooked_GetAddrInfoW, (LPVOID*)&Original_GetAddrInfoW,
-        "GetAddrInfoW()"
+        "GetAddrInfoW()", false
     },
     {
         L"ws2_32.dll", "gethostbyname",
         (LPVOID)Hooked_gethostbyname, (LPVOID*)&Original_gethostbyname,
-        "gethostbyname()"
+        "gethostbyname()", false
+    },
+    /* Async DNS - GetAddrInfoExW (used by modern Windows apps) */
+    {
+        L"ws2_32.dll", "GetAddrInfoExW",
+        (LPVOID)Hooked_GetAddrInfoExW, (LPVOID*)&Original_GetAddrInfoExW,
+        "GetAddrInfoExW()", false
     },
 
     /* Process hooks (for child injection) */
     {
         L"kernel32.dll", "CreateProcessW",
         (LPVOID)Hooked_CreateProcessW, (LPVOID*)&Original_CreateProcessW,
-        "CreateProcessW()"
+        "CreateProcessW()", false
     },
     {
         L"kernel32.dll", "CreateProcessA",
         (LPVOID)Hooked_CreateProcessA, (LPVOID*)&Original_CreateProcessA,
-        "CreateProcessA()"
+        "CreateProcessA()", false
     },
 };
 
@@ -110,16 +128,17 @@ bool install_all_hooks() {
             g_hooks[i].original
         );
 
-        if (status != MH_OK && status != MH_ERROR_MODULE_NOT_FOUND) {
+        if (status != MH_OK && status != MH_ERROR_MODULE_NOT_FOUND &&
+            status != MH_ERROR_FUNCTION_NOT_FOUND) {
             ipc_client_log(PF_LOG_WARN, "Failed to hook %s: %s",
                           g_hooks[i].description, MH_StatusToString(status));
-            /* Non-critical hooks (like CreateProcess) can fail */
-            if (i < 3) {
-                /* Connection hooks are critical */
+            if (g_hooks[i].critical) {
                 all_ok = false;
             }
         } else if (status == MH_OK) {
             ipc_client_log(PF_LOG_DEBUG, "Hooked %s", g_hooks[i].description);
+        } else {
+            ipc_client_log(PF_LOG_DEBUG, "Skipped %s (not found)", g_hooks[i].description);
         }
     }
 
