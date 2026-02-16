@@ -104,12 +104,10 @@ BOOL CreateTrampolineFunction(PTRAMPOLINE ct)
         {
             // The trampoline function is long enough.
             // Complete the function with the jump to the target function.
-#if defined(_M_X64) || defined(__x86_64__)
+            // The instruction at pOldInst is beyond the overwritten area,
+            // so do NOT copy it to the trampoline — jump directly to it.
             jmpDest = pOldInst;
-#else
-            jmpDest = pOldInst;
-#endif
-            finished = TRUE;
+            break;
         }
 #if defined(_M_X64) || defined(__x86_64__)
         else if ((hs.modrm & 0xC7) == 0x05)
@@ -336,10 +334,12 @@ BOOL CreateTrampolineFunction(PTRAMPOLINE ct)
         newPos += sizeof(JMP_REL);
 
         // Create a relay function for the detour.
+        // Encoding: FF 25 00 00 00 00 [8-byte address] = JMP [RIP+0]
         {
             PJMP_RELAY pRelay = (PJMP_RELAY)((LPBYTE)ct->pTrampoline + newPos);
             pRelay->opcode  = 0xFF;
-            pRelay->operand = 0x00000025;   // 25 00 00 00 00 = RIP+0
+            pRelay->modrm   = 0x25;
+            pRelay->disp32  = 0x00000000;
             pRelay->address = (UINT64)(ULONG_PTR)ct->pDetour;
             ct->pRelay = pRelay;
         }
