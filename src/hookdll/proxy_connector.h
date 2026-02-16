@@ -33,6 +33,7 @@ namespace proxyfire {
  * @param username      Proxy username (NULL if no auth)
  * @param password      Proxy password (NULL if no auth)
  * @param timeout_ms    Handshake timeout in milliseconds
+ * @param dest_ipv6     16-byte IPv6 address (NULL if not IPv6)
  *
  * @return 0 on success, -1 on failure (WSAGetLastError set)
  */
@@ -44,13 +45,15 @@ int proxy_handshake(
     uint16_t        dest_port,
     const char*     username,
     const char*     password,
-    uint32_t        timeout_ms
+    uint32_t        timeout_ms,
+    const uint8_t*  dest_ipv6 = nullptr
 );
 
 /* Individual protocol implementations */
 int socks5_handshake(
     SOCKET sock, const char* dest_host, uint32_t dest_ip, uint16_t dest_port,
-    const char* username, const char* password, uint32_t timeout_ms);
+    const char* username, const char* password, uint32_t timeout_ms,
+    const uint8_t* dest_ipv6 = nullptr);
 
 int socks4_handshake(
     SOCKET sock, uint32_t dest_ip, uint16_t dest_port,
@@ -62,6 +65,7 @@ int socks4a_handshake(
 
 int http_connect_handshake(
     SOCKET sock, const char* dest_host, uint32_t dest_ip, uint16_t dest_port,
-    const char* username, const char* password, uint32_t timeout_ms);
+    const char* username, const char* password, uint32_t timeout_ms,
+    const uint8_t* dest_ipv6 = nullptr);
 
 } // namespace proxyfire

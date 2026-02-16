@@ -10,6 +10,7 @@
 #include "proxy_chain.h"
 #include "dns_faker.h"
 #include "socket_context.h"
+#include "udp_relay.h"
 #include "ipc_client.h"
 #include "string_utils.h"
 
@@ -138,6 +139,8 @@ static void restore_socket_state(SOCKET sock, const SocketBlockingState& state) 
 static int route_through_proxy(SOCKET s, const struct sockaddr* name, int namelen) {
     uint32_t dest_ip = 0;
     uint16_t dest_port = 0;
+    uint8_t dest_ipv6[16] = {};
+    bool is_ipv6 = false;
 
     if (name->sa_family == AF_INET) {
         const struct sockaddr_in* addr4 = (const struct sockaddr_in*)name;
@@ -155,25 +158,31 @@ static int route_through_proxy(SOCKET s, const struct sockaddr* name, int namele
             memcpy(&dest_ip, b + 12, 4);
             dest_port = ntohs(addr6->sin6_port);
         } else {
-            /* Pure IPv6 - block if DNS leak prevention is on, otherwise pass through.
-             * We can't proxy pure IPv6 through SOCKS4, but SOCKS5 and HTTP CONNECT
-             * support it. For now, log a warning and let it through if bypassed,
-             * or block it to prevent leaks. */
-            if (g_config.dns_leak_prevention) {
-                ipc_client_log(PF_LOG_WARN,
-                    "Blocked direct IPv6 connection (not yet proxied). "
-                    "Use --allow-dns-leak to permit IPv6 bypass.");
-                WSASetLastError(WSAECONNREFUSED);
-                return SOCKET_ERROR;
+            /* Pure IPv6 - proxy through SOCKS5/HTTP CONNECT (both support IPv6) */
+            if (g_config.proxy_count == 0) {
+                return -2; /* No proxy configured, pass through */
             }
-            return -2;  /* Signal caller to pass through */
+            /* Check if first proxy supports IPv6 (SOCKS4/4a does not) */
+            if (g_config.proxies[0].proto == PROXY_SOCKS4 ||
+                g_config.proxies[0].proto == PROXY_SOCKS4A) {
+                if (g_config.dns_leak_prevention) {
+                    ipc_client_log(PF_LOG_WARN,
+                        "Blocked IPv6 connection: SOCKS4 does not support IPv6");
+                    WSASetLastError(WSAECONNREFUSED);
+                    return SOCKET_ERROR;
+                }
+                return -2; /* Can't proxy IPv6 via SOCKS4, pass through */
+            }
+            is_ipv6 = true;
+            memcpy(dest_ipv6, addr6->sin6_addr.s6_addr, 16);
+            dest_port = ntohs(addr6->sin6_port);
         }
     } else {
         return -2;  /* Not IP, pass through */
     }
 
-    /* Check bypass rules */
-    if (should_bypass(&g_config, dest_ip, dest_port)) {
+    /* Check bypass rules (IPv4 only; IPv6 bypass TBD) */
+    if (!is_ipv6 && should_bypass(&g_config, dest_ip, dest_port)) {
         return -2;  /* Signal caller to pass through */
     }
 
@@ -182,26 +191,36 @@ static int route_through_proxy(SOCKET s, const struct sockaddr* name, int namele
         return -2;
     }
 
-    /* Check if this is a fake DNS IP -> get hostname */
+    /* Check if this is a fake DNS IP -> get hostname (IPv4 only, no fake IPs for IPv6) */
     const char* hostname = nullptr;
-    if (dns_faker_is_fake(dest_ip)) {
+    if (!is_ipv6 && dns_faker_is_fake(dest_ip)) {
         hostname = dns_faker_lookup(dest_ip);
     }
 
     /* Log the connection attempt */
     if (g_config.verbose) {
-        ipc_client_log(PF_LOG_INFO, "connect() -> %s:%u via %s proxy %s:%u",
-                      hostname ? hostname : ip_to_string(dest_ip).c_str(),
-                      dest_port,
-                      proxy_proto_name(g_config.proxies[0].proto),
-                      g_config.proxies[0].host, g_config.proxies[0].port);
+        if (is_ipv6) {
+            char ipv6_str[INET6_ADDRSTRLEN];
+            inet_ntop(AF_INET6, dest_ipv6, ipv6_str, sizeof(ipv6_str));
+            ipc_client_log(PF_LOG_INFO, "connect() -> [%s]:%u via %s proxy %s:%u",
+                          ipv6_str, dest_port,
+                          proxy_proto_name(g_config.proxies[0].proto),
+                          g_config.proxies[0].host, g_config.proxies[0].port);
+        } else {
+            ipc_client_log(PF_LOG_INFO, "connect() -> %s:%u via %s proxy %s:%u",
+                          hostname ? hostname : ip_to_string(dest_ip).c_str(),
+                          dest_port,
+                          proxy_proto_name(g_config.proxies[0].proto),
+                          g_config.proxies[0].host, g_config.proxies[0].port);
+        }
     }
 
     /* Save socket state and force blocking for handshake */
     SocketBlockingState saved_state = save_and_set_blocking(s);
 
     /* Connect through the proxy chain */
-    int result = proxy_chain_connect(s, &g_config, dest_ip, dest_port, hostname);
+    int result = proxy_chain_connect(s, &g_config, dest_ip, dest_port, hostname,
+                                      is_ipv6 ? dest_ipv6 : nullptr);
 
     /* Restore socket state */
     restore_socket_state(s, saved_state);
@@ -210,9 +229,16 @@ static int route_through_proxy(SOCKET s, const struct sockaddr* name, int namele
     if (result == 0) {
         socket_ctx_add(s, dest_ip, dest_port, hostname, true);
     } else {
-        ipc_client_log(PF_LOG_ERROR, "Proxy connection failed for %s:%u",
-                      hostname ? hostname : ip_to_string(dest_ip).c_str(),
-                      dest_port);
+        if (is_ipv6) {
+            char ipv6_str[INET6_ADDRSTRLEN];
+            inet_ntop(AF_INET6, dest_ipv6, ipv6_str, sizeof(ipv6_str));
+            ipc_client_log(PF_LOG_ERROR, "Proxy connection failed for [%s]:%u",
+                          ipv6_str, dest_port);
+        } else {
+            ipc_client_log(PF_LOG_ERROR, "Proxy connection failed for %s:%u",
+                          hostname ? hostname : ip_to_string(dest_ip).c_str(),
+                          dest_port);
+        }
     }
 
     return result;
@@ -510,6 +536,7 @@ BOOL WSAAPI Hooked_WSAConnectByNameA(SOCKET s, LPCSTR nodename, LPCSTR servicena
  * Hooked closesocket()
  */
 int WSAAPI Hooked_closesocket(SOCKET s) {
+    udp_relay_close(s);
     socket_ctx_remove(s);
     return Original_closesocket(s);
 }

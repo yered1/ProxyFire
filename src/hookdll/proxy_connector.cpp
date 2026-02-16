@@ -137,7 +137,8 @@ static int recv_line(SOCKET sock, char* buf, int maxlen, uint32_t timeout_ms) {
  */
 int socks5_handshake(
     SOCKET sock, const char* dest_host, uint32_t dest_ip, uint16_t dest_port,
-    const char* username, const char* password, uint32_t timeout_ms)
+    const char* username, const char* password, uint32_t timeout_ms,
+    const uint8_t* dest_ipv6)
 {
     uint8_t buf[512];
     bool need_auth = (username && username[0] != '\0');
@@ -226,7 +227,12 @@ int socks5_handshake(
     buf[pos++] = SOCKS5_CMD_CONNECT;    /* Command: CONNECT */
     buf[pos++] = 0x00;                  /* Reserved */
 
-    if (dest_host && dest_host[0] != '\0') {
+    if (dest_ipv6) {
+        /* Use IPv6 address (16 bytes) */
+        buf[pos++] = SOCKS5_ATYP_IPV6;
+        memcpy(buf + pos, dest_ipv6, 16);
+        pos += 16;
+    } else if (dest_host && dest_host[0] != '\0') {
         /* Use domain name (remote DNS resolution) */
         size_t host_len = strlen(dest_host);
         if (host_len > 255) {
@@ -457,11 +463,17 @@ int socks4a_handshake(
  */
 int http_connect_handshake(
     SOCKET sock, const char* dest_host, uint32_t dest_ip, uint16_t dest_port,
-    const char* username, const char* password, uint32_t timeout_ms)
+    const char* username, const char* password, uint32_t timeout_ms,
+    const uint8_t* dest_ipv6)
 {
     /* Build target string */
     std::string target;
-    if (dest_host && dest_host[0] != '\0') {
+    if (dest_ipv6) {
+        /* IPv6: use bracket notation [addr]:port */
+        char ipv6_str[INET6_ADDRSTRLEN];
+        inet_ntop(AF_INET6, dest_ipv6, ipv6_str, sizeof(ipv6_str));
+        target = "[" + std::string(ipv6_str) + "]:" + std::to_string(dest_port);
+    } else if (dest_host && dest_host[0] != '\0') {
         target = std::string(dest_host) + ":" + std::to_string(dest_port);
     } else {
         target = ip_to_string(dest_ip) + ":" + std::to_string(dest_port);
@@ -554,12 +566,13 @@ int proxy_handshake(
     uint16_t        dest_port,
     const char*     username,
     const char*     password,
-    uint32_t        timeout_ms)
+    uint32_t        timeout_ms,
+    const uint8_t*  dest_ipv6)
 {
     switch (proto) {
         case PROXY_SOCKS5:
             return socks5_handshake(sock, dest_host, dest_ip, dest_port,
-                                    username, password, timeout_ms);
+                                    username, password, timeout_ms, dest_ipv6);
 
         case PROXY_SOCKS4:
             return socks4_handshake(sock, dest_ip, dest_port,
@@ -571,7 +584,8 @@ int proxy_handshake(
 
         case PROXY_HTTP:
             return http_connect_handshake(sock, dest_host, dest_ip, dest_port,
-                                          username, password, timeout_ms);
+                                          username, password, timeout_ms,
+                                          dest_ipv6);
 
         default:
             WSASetLastError(WSAECONNREFUSED);

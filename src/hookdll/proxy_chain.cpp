@@ -70,7 +70,8 @@ int proxy_chain_connect(
     const ProxyFireConfig* config,
     uint32_t            dest_ip,
     uint16_t            dest_port,
-    const char*         dest_hostname)
+    const char*         dest_hostname,
+    const uint8_t*      dest_ipv6)
 {
     if (!config || config->proxy_count == 0) {
         /* No proxy configured - this shouldn't happen */
@@ -114,6 +115,7 @@ int proxy_chain_connect(
         const char* next_host = nullptr;
         uint32_t    next_ip = 0;
         uint16_t    next_port = 0;
+        const uint8_t* next_ipv6 = nullptr;
 
         if (i + 1 < config->proxy_count) {
             /* Connect to next proxy in chain */
@@ -121,11 +123,13 @@ int proxy_chain_connect(
             next_host = next_proxy->host;
             next_ip   = next_proxy->ip;
             next_port = next_proxy->port;
+            /* Intermediate hops are always IPv4 proxies, no IPv6 needed */
         } else {
             /* Last proxy - connect to actual destination */
             next_host = dest_hostname;
             next_ip   = dest_ip;
             next_port = dest_port;
+            next_ipv6 = dest_ipv6;
         }
 
         rc = proxy_handshake(
@@ -136,7 +140,8 @@ int proxy_chain_connect(
             next_port,
             proxy->username[0] ? proxy->username : nullptr,
             proxy->password[0] ? proxy->password : nullptr,
-            config->connect_timeout_ms
+            config->connect_timeout_ms,
+            next_ipv6
         );
 
         if (rc != 0) {

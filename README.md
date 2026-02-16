@@ -12,10 +12,11 @@ ProxyFire works with **any Windows executable** - GUI or CLI, regardless of the 
 
 - **Multiple proxy protocols**: SOCKS5 (with username/password auth), SOCKS4, SOCKS4a, HTTP CONNECT
 - **Proxy chaining**: Route through multiple proxies in sequence (multi-hop)
+- **TCP and UDP proxying**: Full TCP proxying through all protocols; UDP proxying via SOCKS5 UDP ASSOCIATE (RFC 1928)
 - **DNS leak prevention**: Intercepts all DNS queries (Winsock, async, and raw UDP port 53) and resolves remotely through the proxy
-- **Full API coverage**: Hooks Winsock2 (connect, WSAConnect, ConnectEx, WSAConnectByName), WinHTTP, and WinINet
-- **UDP DNS blocking**: Blocks raw UDP DNS queries (port 53) when DNS leak prevention is enabled
-- **IPv6 handling**: Proxies IPv4-mapped IPv6 addresses; blocks pure IPv6 to prevent leaks
+- **Full API coverage**: Hooks 22 functions across Winsock2, WinHTTP, and WinINet
+- **IPv6 support**: Full IPv6 proxying through SOCKS5 (ATYP IPv6) and HTTP CONNECT (bracket notation)
+- **UAC auto-elevation**: Automatically detects and re-launches with elevated privileges when targeting processes that require admin rights
 - **Child process injection**: Optionally inject into spawned child processes
 - **Works with any EXE**: GUI apps, CLI tools, .NET, Java, Python, Electron, native - all work
 - **x86 and x64 support**: Automatically detects target architecture
@@ -185,11 +186,13 @@ Proxy URI formats:
 |  |  | WSAConn  | | info()   | |            |    |    |
 |  |  | ConnectEx| | ExW()    | | InternetOp |    |    |
 |  |  | ByName() | | sendto() | | WinHttpOp  |    |    |
+|  |  | UDP relay| | recvfrom | |            |    |    |
 |  |  +----+-----+ +----+-----+ +-----+------+    |    |
 |  |       |             |             |           |    |
 |  |  +----v-------------v-------------v-------+   |    |
 |  |  |  Proxy Chain Connector                 |   |    |
-|  |  |  SOCKS5 / SOCKS4 / HTTP CONNECT       |   |    |
+|  |  |  TCP: SOCKS5 / SOCKS4 / HTTP CONNECT  |   |    |
+|  |  |  UDP: SOCKS5 UDP ASSOCIATE relay       |   |    |
 |  |  +-------------------+--------------------+   |    |
 |  +------------------------------+----------------+    |
 |                                 |                     |
@@ -218,8 +221,10 @@ Proxy URI formats:
 | `WSAConnectByNameW/A()` | ws2_32.dll | Connect by hostname (bypasses DNS+connect) |
 | `WSAIoctl()` | ws2_32.dll | Intercept ConnectEx function pointer requests |
 | `closesocket()` | ws2_32.dll | Track socket lifecycle |
-| `sendto()` | ws2_32.dll | Block UDP DNS queries (port 53) |
-| `WSASendTo()` | ws2_32.dll | Block UDP DNS queries (scatter/gather) |
+| `sendto()` | ws2_32.dll | SOCKS5 UDP relay / DNS leak prevention |
+| `WSASendTo()` | ws2_32.dll | SOCKS5 UDP relay (scatter/gather) / DNS leak prevention |
+| `recvfrom()` | ws2_32.dll | SOCKS5 UDP relay receive |
+| `WSARecvFrom()` | ws2_32.dll | SOCKS5 UDP relay receive (scatter/gather) |
 | `getaddrinfo()` | ws2_32.dll | DNS leak prevention (returns fake IPs) |
 | `GetAddrInfoW()` | ws2_32.dll | Wide-string DNS leak prevention |
 | `GetAddrInfoExW()` | ws2_32.dll | Async DNS leak prevention (.NET, UWP) |
@@ -237,7 +242,7 @@ When DNS leak prevention is enabled (default), ProxyFire uses a multi-layer appr
 
 1. **DNS API Hooks**: Intercepts `getaddrinfo`, `GetAddrInfoW`, `GetAddrInfoExW`, and `gethostbyname` - returns "fake" IP addresses from the reserved `240.0.0.0/4` range. When `connect()` sees a fake IP, it passes the original hostname to the SOCKS5 proxy for remote DNS resolution.
 
-2. **UDP DNS Blocking**: Hooks `sendto()` and `WSASendTo()` to block raw UDP packets to port 53, preventing applications from bypassing the DNS hooks with direct UDP DNS queries.
+2. **UDP DNS Handling**: When using a SOCKS5 proxy, DNS queries sent via raw UDP are relayed through the proxy using UDP ASSOCIATE. For non-SOCKS5 proxies, `sendto()` and `WSASendTo()` hooks block UDP packets to port 53.
 
 3. **WinHTTP/WinINet Proxy**: Forces higher-level HTTP APIs to use the configured proxy, which handles DNS resolution on the proxy side.
 
@@ -260,11 +265,10 @@ The following address ranges are automatically bypassed (never proxied):
 
 ## Limitations
 
-- **TCP only**: Non-DNS UDP traffic is not proxied (SOCKS5 UDP ASSOCIATE support is planned). DNS UDP is blocked when leak prevention is on.
 - **Windows only**: Requires Windows 7+ (x86 or x64). WinHTTP SOCKS proxy requires Windows 8.1+.
-- **IPv6**: Pure IPv6 connections are blocked when DNS leak prevention is enabled. IPv4-mapped IPv6 addresses (`::ffff:x.x.x.x`) are fully supported.
+- **UDP proxying requires SOCKS5**: Full UDP relay is only available when the first proxy in the chain is SOCKS5 (via UDP ASSOCIATE). Non-SOCKS5 proxies only block DNS UDP.
+- **Overlapped UDP**: Asynchronous/overlapped UDP I/O (`WSASendTo`/`WSARecvFrom` with `LPOVERLAPPED`) falls back to direct send when relay is active. Synchronous and non-overlapped calls are fully relayed.
 - **Proxy timeout**: If the proxy server is unreachable, connections may hang for up to the configured timeout (default 30 seconds) before failing. For GUI apps, this may cause a brief "Not Responding" state.
-- **Admin rights**: May be required for some target processes.
 - **Anti-cheat software**: Some applications with anti-tampering may detect the hook DLL.
 - **Raw sockets**: Applications using `SOCK_RAW` bypass all hooks. This is uncommon for normal applications.
 - **DLL search path**: Ensure `proxyfire_hook64.dll` / `proxyfire_hook32.dll` are in the same directory as `proxyfire.exe`.

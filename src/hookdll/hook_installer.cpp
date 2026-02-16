@@ -51,6 +51,11 @@ extern int     (WSAAPI *Original_sendto)(SOCKET, const char*, int, int,
 extern int     (WSAAPI *Original_WSASendTo)(SOCKET, LPWSABUF, DWORD, LPDWORD, DWORD,
                 const struct sockaddr*, int, LPWSAOVERLAPPED,
                 LPWSAOVERLAPPED_COMPLETION_ROUTINE);
+extern int     (WSAAPI *Original_recvfrom)(SOCKET, char*, int, int,
+                struct sockaddr*, int*);
+extern int     (WSAAPI *Original_WSARecvFrom)(SOCKET, LPWSABUF, DWORD, LPDWORD, LPDWORD,
+                struct sockaddr*, LPINT, LPWSAOVERLAPPED,
+                LPWSAOVERLAPPED_COMPLETION_ROUTINE);
 
 /* DNS hooks */
 extern int     (WSAAPI *Original_getaddrinfo)(const char*, const char*,
@@ -116,7 +121,7 @@ static HookEntry g_hooks[] = {
         "WSAConnectByNameA()", false
     },
 
-    /* UDP hooks - block DNS over UDP to prevent leaks */
+    /* UDP hooks - SOCKS5 UDP ASSOCIATE relay + DNS leak prevention */
     {
         L"ws2_32.dll", "sendto",
         (LPVOID)Hooked_sendto, (LPVOID*)&Original_sendto,
@@ -126,6 +131,16 @@ static HookEntry g_hooks[] = {
         L"ws2_32.dll", "WSASendTo",
         (LPVOID)Hooked_WSASendTo, (LPVOID*)&Original_WSASendTo,
         "WSASendTo()", false
+    },
+    {
+        L"ws2_32.dll", "recvfrom",
+        (LPVOID)Hooked_recvfrom, (LPVOID*)&Original_recvfrom,
+        "recvfrom()", false
+    },
+    {
+        L"ws2_32.dll", "WSARecvFrom",
+        (LPVOID)Hooked_WSARecvFrom, (LPVOID*)&Original_WSARecvFrom,
+        "WSARecvFrom()", false
     },
 
     /* DNS hooks */
