@@ -28,6 +28,7 @@
 #include <cstring>
 #include <cstdio>
 #include <map>
+#include <memory>
 
 #ifdef _WIN32
 #include <winsock2.h>
@@ -424,6 +425,11 @@ int udp_relay_sendto(UdpRelaySession* session, const char* buf, int len,
         return SOCKET_ERROR;
     }
 
+    if (len < 0) {
+        WSASetLastError(WSAEFAULT);
+        return SOCKET_ERROR;
+    }
+
     /*
      * Build SOCKS5 UDP request header:
      * +------+------+------+----------+----------+----------+
@@ -528,19 +534,26 @@ int udp_relay_recvfrom(UdpRelaySession* session, char* buf, int len,
         return SOCKET_ERROR;
     }
 
-    /* Receive from the relay socket */
-    uint8_t recv_buf[65536];
+    /* Receive from the relay socket.
+     * Use heap allocation instead of a 64KB stack buffer to avoid
+     * stack overflow on application threads with deep call stacks. */
+    std::unique_ptr<uint8_t[]> recv_buf(new (std::nothrow) uint8_t[UDP_RELAY_BUFSIZE]);
+    if (!recv_buf) {
+        WSASetLastError(WSAENOBUFS);
+        return SOCKET_ERROR;
+    }
+
     struct sockaddr_in sender;
     int sender_len = sizeof(sender);
 
     int received;
     if (Original_recvfrom) {
-        received = Original_recvfrom(session->relay_sock, (char*)recv_buf,
-                                      sizeof(recv_buf), 0,
+        received = Original_recvfrom(session->relay_sock, (char*)recv_buf.get(),
+                                      UDP_RELAY_BUFSIZE, 0,
                                       (struct sockaddr*)&sender, &sender_len);
     } else {
-        received = recvfrom(session->relay_sock, (char*)recv_buf,
-                            sizeof(recv_buf), 0,
+        received = recvfrom(session->relay_sock, (char*)recv_buf.get(),
+                            UDP_RELAY_BUFSIZE, 0,
                             (struct sockaddr*)&sender, &sender_len);
     }
 
@@ -631,10 +644,15 @@ int udp_relay_recvfrom(UdpRelaySession* session, char* buf, int len,
 
     /* Copy application data to caller's buffer */
     int data_len = received - pos;
-    if (data_len < 0) data_len = 0;
+    if (data_len < 0) {
+        ipc_client_log(PF_LOG_WARN, "UDP relay: malformed SOCKS5 header (pos=%d > received=%d)",
+                       pos, received);
+        WSASetLastError(WSAEMSGSIZE);
+        return SOCKET_ERROR;
+    }
 
     int copy_len = (data_len < len) ? data_len : len;
-    memcpy(buf, recv_buf + pos, copy_len);
+    memcpy(buf, recv_buf.get() + pos, copy_len);
 
     return copy_len;
 }
@@ -675,6 +693,19 @@ bool udp_relay_has_session(SOCKET app_sock) {
     bool found = (it != g_sessions.end() && it->second->active);
     ReleaseSRWLockShared(&g_sessions_lock);
     return found;
+}
+
+UdpRelaySession* udp_relay_get(SOCKET app_sock) {
+    if (!g_initialized) return nullptr;
+
+    AcquireSRWLockShared(&g_sessions_lock);
+    auto it = g_sessions.find(app_sock);
+    UdpRelaySession* session = nullptr;
+    if (it != g_sessions.end() && it->second->active) {
+        session = it->second;
+    }
+    ReleaseSRWLockShared(&g_sessions_lock);
+    return session;
 }
 
 } // namespace proxyfire

@@ -126,8 +126,10 @@ int WSAAPI Hooked_sendto(SOCKET s, const char* buf, int len, int flags,
             }
             /* If relay fails, log and fall through to original for non-DNS,
              * or block for DNS to prevent leaks */
+            int relay_err = WSAGetLastError();
             ipc_client_log(PF_LOG_WARN,
-                           "UDP relay sendto() failed, error %d", WSAGetLastError());
+                           "UDP relay sendto() failed, error %d", relay_err);
+            WSASetLastError(relay_err);
         }
 
         /* If relay session creation failed and this is DNS, block it */
@@ -234,8 +236,10 @@ int WSAAPI Hooked_WSASendTo(SOCKET s, LPWSABUF lpBuffers, DWORD dwBufferCount,
                 return 0;
             }
 
+            int relay_err = WSAGetLastError();
             ipc_client_log(PF_LOG_WARN,
-                           "UDP relay WSASendTo() failed, error %d", WSAGetLastError());
+                           "UDP relay WSASendTo() failed, error %d", relay_err);
+            WSASetLastError(relay_err);
         } else {
             if (flat_buf != stack_buf) delete[] flat_buf;
         }
@@ -288,17 +292,21 @@ int WSAAPI Hooked_WSASendTo(SOCKET s, LPWSABUF lpBuffers, DWORD dwBufferCount,
 int WSAAPI Hooked_recvfrom(SOCKET s, char* buf, int len, int flags,
                             struct sockaddr* from, int* fromlen)
 {
-    /* If a relay session exists for this socket, receive through the relay */
-    if (is_socks5_proxy_available() && udp_relay_has_session(s)) {
-        UdpRelaySession* session = udp_relay_get_or_create(s);
+    /* If a relay session exists for this socket, receive through the relay.
+     * Use udp_relay_get() (not get_or_create) since recvfrom should never
+     * initiate a new UDP ASSOCIATE handshake. */
+    if (is_socks5_proxy_available()) {
+        UdpRelaySession* session = udp_relay_get(s);
         if (session) {
             int result = udp_relay_recvfrom(session, buf, len, from, fromlen);
             if (result != SOCKET_ERROR) {
                 return result;
             }
             /* On relay failure, fall through to original */
+            int err = WSAGetLastError();
             ipc_client_log(PF_LOG_WARN,
-                           "UDP relay recvfrom() failed, error %d", WSAGetLastError());
+                           "UDP relay recvfrom() failed, error %d", err);
+            WSASetLastError(err);
         }
     }
 
@@ -316,9 +324,11 @@ int WSAAPI Hooked_WSARecvFrom(SOCKET s, LPWSABUF lpBuffers, DWORD dwBufferCount,
                                LPWSAOVERLAPPED_COMPLETION_ROUTINE lpCompletionRoutine)
 {
     /* If a relay session exists for this socket, receive through the relay.
-     * Only handle non-overlapped (synchronous) calls through the relay. */
-    if (!lpOverlapped && is_socks5_proxy_available() && udp_relay_has_session(s)) {
-        UdpRelaySession* session = udp_relay_get_or_create(s);
+     * Only handle non-overlapped (synchronous) calls through the relay.
+     * Use udp_relay_get() (not get_or_create) since recvfrom should never
+     * initiate a new UDP ASSOCIATE handshake. */
+    if (!lpOverlapped && is_socks5_proxy_available()) {
+        UdpRelaySession* session = udp_relay_get(s);
         if (session && dwBufferCount > 0 && lpBuffers && lpBuffers[0].buf) {
             int from_len = (lpFromlen) ? *lpFromlen : 0;
             int result = udp_relay_recvfrom(session,
@@ -332,8 +342,10 @@ int WSAAPI Hooked_WSARecvFrom(SOCKET s, LPWSABUF lpBuffers, DWORD dwBufferCount,
                 return 0;
             }
 
+            int err = WSAGetLastError();
             ipc_client_log(PF_LOG_WARN,
-                           "UDP relay WSARecvFrom() failed, error %d", WSAGetLastError());
+                           "UDP relay WSARecvFrom() failed, error %d", err);
+            WSASetLastError(err);
         }
     }
 

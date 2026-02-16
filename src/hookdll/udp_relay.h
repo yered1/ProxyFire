@@ -52,8 +52,13 @@ void udp_relay_close(SOCKET app_sock);
 /* Cleanup all relay sessions */
 void udp_relay_cleanup();
 
-/* Check if a relay session exists for a socket (lock-free peek) */
+/* Check if a relay session exists for a socket (shared-lock lookup) */
 bool udp_relay_has_session(SOCKET app_sock);
+
+/* Get an existing relay session without creating one.
+ * Returns nullptr if no active session exists. Used by recvfrom hooks
+ * which should never initiate new sessions. */
+UdpRelaySession* udp_relay_get(SOCKET app_sock);
 
 } // namespace proxyfire
 #endif
