@@ -12,6 +12,7 @@
 #include "ipc_server.h"
 #include "ipc_messages.h"
 #include "logger.h"
+#include "string_utils.h"
 
 #include <proxyfire/common.h>
 #include <proxyfire/ipc_protocol.h>

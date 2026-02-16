@@ -18,9 +18,6 @@
 #include <windows.h>
 #include "buffer.h"
 
-// Size of each memory slot.
-#define MEMORY_SLOT_SIZE 64
-
 #if defined(_M_X64) || defined(__x86_64__)
 static LPVOID FindPrevFreeRegion(LPVOID pAddress, LPVOID pMinAddr, DWORD dwAllocationGranularity);
 static LPVOID FindNextFreeRegion(LPVOID pAddress, LPVOID pMaxAddr, DWORD dwAllocationGranularity);

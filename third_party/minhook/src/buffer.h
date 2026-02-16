@@ -22,6 +22,9 @@
 // Size of each memory block. (= page size of VirtualAlloc)
 #define MEMORY_BLOCK_SIZE 0x1000
 
+// Size of each memory slot.
+#define MEMORY_SLOT_SIZE 64
+
 // Max range for seeking a memory block. (= 1024MB)
 #define MAX_MEMORY_RANGE 0x40000000
 

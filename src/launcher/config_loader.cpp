@@ -34,7 +34,8 @@ static std::string strip_quotes(const std::string& s) {
 
 static bool parse_bool(const std::string& val) {
     std::string v = val;
-    std::transform(v.begin(), v.end(), v.begin(), ::tolower);
+    std::transform(v.begin(), v.end(), v.begin(),
+                   [](unsigned char c) { return (char)std::tolower(c); });
     return v == "true" || v == "yes" || v == "1" || v == "on";
 }
 
