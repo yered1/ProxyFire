@@ -41,7 +41,7 @@
 #define PF_INTERNET_OPEN_TYPE_PROXY         3
 
 /* Global config - set during DLL init */
-extern proxyfire::ProxyFireConfig g_config;
+extern ProxyFireConfig g_config;
 
 /* Original function pointers */
 void* (WINAPI *Original_WinHttpOpen)(const wchar_t*, DWORD,

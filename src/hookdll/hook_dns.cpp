@@ -24,7 +24,7 @@
 
 #pragma comment(lib, "ws2_32.lib")
 
-extern proxyfire::ProxyFireConfig g_config;
+extern ProxyFireConfig g_config;
 
 /* Original function pointers */
 int (WSAAPI *Original_getaddrinfo)(const char*, const char*,

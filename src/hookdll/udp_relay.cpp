@@ -48,7 +48,7 @@ extern int (WSAAPI *Original_recvfrom)(SOCKET, char*, int, int,
                                         struct sockaddr*, int*);
 
 /* Global config - set during DLL init */
-extern proxyfire::ProxyFireConfig g_config;
+extern ProxyFireConfig g_config;
 
 namespace proxyfire {
 
@@ -599,9 +599,9 @@ int udp_relay_recvfrom(UdpRelaySession* session, char* buf, int len,
             WSASetLastError(WSAEMSGSIZE);
             return SOCKET_ERROR;
         }
-        memcpy(&src_v4.sin_addr.s_addr, recv_buf + pos, 4);
+        memcpy(&src_v4.sin_addr.s_addr, recv_buf.get() + pos, 4);
         pos += 4;
-        memcpy(&src_v4.sin_port, recv_buf + pos, 2);
+        memcpy(&src_v4.sin_port, recv_buf.get() + pos, 2);
         pos += 2;
     } else if (atyp == SOCKS5_ATYP_DOMAIN) {
         if (pos + 1 > received) {
@@ -616,7 +616,7 @@ int udp_relay_recvfrom(UdpRelaySession* session, char* buf, int len,
         /* We can't convert domain back to IP easily; use 0.0.0.0 */
         src_v4.sin_addr.s_addr = 0;
         pos += dlen;
-        memcpy(&src_v4.sin_port, recv_buf + pos, 2);
+        memcpy(&src_v4.sin_port, recv_buf.get() + pos, 2);
         pos += 2;
     } else if (atyp == SOCKS5_ATYP_IPV6) {
         if (pos + 18 > received) {
@@ -626,7 +626,7 @@ int udp_relay_recvfrom(UdpRelaySession* session, char* buf, int len,
         /* Store first 4 bytes as a rough source hint for IPv4-only callers */
         src_v4.sin_addr.s_addr = 0;
         pos += 16;
-        memcpy(&src_v4.sin_port, recv_buf + pos, 2);
+        memcpy(&src_v4.sin_port, recv_buf.get() + pos, 2);
         pos += 2;
     } else {
         ipc_client_log(PF_LOG_WARN, "UDP relay: unknown ATYP 0x%02X in response", atyp);

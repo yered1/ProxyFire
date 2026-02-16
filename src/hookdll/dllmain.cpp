@@ -27,7 +27,7 @@
 #include <MinHook.h>
 
 /* Global configuration - shared with all hook files */
-proxyfire::ProxyFireConfig g_config;
+ProxyFireConfig g_config;
 
 static HMODULE g_hModule = nullptr;
 static bool g_hooks_installed = false;
@@ -153,5 +153,5 @@ BOOL APIENTRY DllMain(HMODULE hModule, DWORD ul_reason_for_call, LPVOID lpReserv
 
 #else
 /* Non-Windows stub for compilation testing */
-proxyfire::ProxyFireConfig g_config;
+ProxyFireConfig g_config;
 #endif

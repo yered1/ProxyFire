@@ -19,7 +19,7 @@
 #ifdef _WIN32
 #include <windows.h>
 
-extern proxyfire::ProxyFireConfig g_config;
+extern ProxyFireConfig g_config;
 
 /* Original function pointers */
 BOOL (WINAPI *Original_CreateProcessW)(LPCWSTR, LPWSTR,

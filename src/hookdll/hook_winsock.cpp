@@ -27,7 +27,7 @@
 #pragma comment(lib, "ws2_32.lib")
 
 /* Global config - set during DLL init */
-extern proxyfire::ProxyFireConfig g_config;
+extern ProxyFireConfig g_config;
 
 /* Original function pointers */
 int (WSAAPI *Original_connect)(SOCKET, const struct sockaddr*, int) = nullptr;

@@ -27,6 +27,7 @@
 #include <proxyfire/common.h>
 
 #include <cstring>
+#include <cstdio>
 
 #ifdef _WIN32
 #include <winsock2.h>
@@ -35,7 +36,7 @@
 #pragma comment(lib, "ws2_32.lib")
 
 /* Global config - set during DLL init */
-extern proxyfire::ProxyFireConfig g_config;
+extern ProxyFireConfig g_config;
 
 /* Original function pointers - sendto/WSASendTo */
 int (WSAAPI *Original_sendto)(SOCKET, const char*, int, int,
