@@ -3,6 +3,8 @@ add_library(proxyfire_hook SHARED
     hook_installer.cpp
     hook_winsock.cpp
     hook_dns.cpp
+    hook_udp.cpp
+    hook_winhttp.cpp
     hook_process.cpp
     proxy_connector.cpp
     proxy_chain.cpp

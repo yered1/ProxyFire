@@ -7,6 +7,8 @@
 #include "hook_winsock.h"
 #include "hook_dns.h"
 #include "hook_process.h"
+#include "hook_winhttp.h"
+#include "hook_udp.h"
 #include "ipc_client.h"
 
 #include <MinHook.h>
@@ -36,6 +38,19 @@ extern int     (WSAAPI *Original_WSAConnect)(SOCKET, const struct sockaddr*, int
 extern int     (WSAAPI *Original_closesocket)(SOCKET);
 extern int     (WSAAPI *Original_WSAIoctl)(SOCKET, DWORD, LPVOID, DWORD, LPVOID, DWORD,
                 LPDWORD, LPWSAOVERLAPPED, LPWSAOVERLAPPED_COMPLETION_ROUTINE);
+extern BOOL    (WSAAPI *Original_WSAConnectByNameW)(SOCKET, LPWSTR, LPWSTR,
+                LPDWORD, LPSOCKADDR, LPDWORD, LPSOCKADDR,
+                const struct timeval*, LPWSAOVERLAPPED);
+extern BOOL    (WSAAPI *Original_WSAConnectByNameA)(SOCKET, LPCSTR, LPCSTR,
+                LPDWORD, LPSOCKADDR, LPDWORD, LPSOCKADDR,
+                const struct timeval*, LPWSAOVERLAPPED);
+
+/* UDP hooks */
+extern int     (WSAAPI *Original_sendto)(SOCKET, const char*, int, int,
+                const struct sockaddr*, int);
+extern int     (WSAAPI *Original_WSASendTo)(SOCKET, LPWSABUF, DWORD, LPDWORD, DWORD,
+                const struct sockaddr*, int, LPWSAOVERLAPPED,
+                LPWSAOVERLAPPED_COMPLETION_ROUTINE);
 
 /* DNS hooks */
 extern int     (WSAAPI *Original_getaddrinfo)(const char*, const char*,
@@ -46,6 +61,17 @@ extern struct hostent* (WSAAPI *Original_gethostbyname)(const char*);
 extern int     (WSAAPI *Original_GetAddrInfoExW)(const wchar_t*, const wchar_t*,
                 DWORD, LPGUID, const ADDRINFOEXW*, PADDRINFOEXW*, struct timeval*,
                 LPOVERLAPPED, LPLOOKUPSERVICE_COMPLETION_ROUTINE, LPHANDLE);
+
+/* WinHTTP hooks */
+extern void*   (WINAPI *Original_WinHttpOpen)(const wchar_t*, DWORD,
+                const wchar_t*, const wchar_t*, DWORD);
+extern int     (WINAPI *Original_WinHttpSetOption)(void*, DWORD, void*, DWORD);
+
+/* WinINet hooks */
+extern void*   (WINAPI *Original_InternetOpenW)(const wchar_t*, DWORD,
+                const wchar_t*, const wchar_t*, DWORD);
+extern void*   (WINAPI *Original_InternetOpenA)(const char*, DWORD,
+                const char*, const char*, DWORD);
 
 /* Process hooks */
 extern BOOL    (WINAPI *Original_CreateProcessW)(LPCWSTR, LPWSTR,
@@ -78,6 +104,29 @@ static HookEntry g_hooks[] = {
         (LPVOID)Hooked_WSAIoctl, (LPVOID*)&Original_WSAIoctl,
         "WSAIoctl()", false
     },
+    /* WSAConnectByName - connects by hostname, bypasses getaddrinfo+connect */
+    {
+        L"ws2_32.dll", "WSAConnectByNameW",
+        (LPVOID)Hooked_WSAConnectByNameW, (LPVOID*)&Original_WSAConnectByNameW,
+        "WSAConnectByNameW()", false
+    },
+    {
+        L"ws2_32.dll", "WSAConnectByNameA",
+        (LPVOID)Hooked_WSAConnectByNameA, (LPVOID*)&Original_WSAConnectByNameA,
+        "WSAConnectByNameA()", false
+    },
+
+    /* UDP hooks - block DNS over UDP to prevent leaks */
+    {
+        L"ws2_32.dll", "sendto",
+        (LPVOID)Hooked_sendto, (LPVOID*)&Original_sendto,
+        "sendto()", false
+    },
+    {
+        L"ws2_32.dll", "WSASendTo",
+        (LPVOID)Hooked_WSASendTo, (LPVOID*)&Original_WSASendTo,
+        "WSASendTo()", false
+    },
 
     /* DNS hooks */
     {
@@ -100,6 +149,30 @@ static HookEntry g_hooks[] = {
         L"ws2_32.dll", "GetAddrInfoExW",
         (LPVOID)Hooked_GetAddrInfoExW, (LPVOID*)&Original_GetAddrInfoExW,
         "GetAddrInfoExW()", false
+    },
+
+    /* WinHTTP hooks - force proxy settings on higher-level HTTP API */
+    {
+        L"winhttp.dll", "WinHttpOpen",
+        (LPVOID)Hooked_WinHttpOpen, (LPVOID*)&Original_WinHttpOpen,
+        "WinHttpOpen()", false
+    },
+    {
+        L"winhttp.dll", "WinHttpSetOption",
+        (LPVOID)Hooked_WinHttpSetOption, (LPVOID*)&Original_WinHttpSetOption,
+        "WinHttpSetOption()", false
+    },
+
+    /* WinINet hooks - force proxy settings on Internet Explorer HTTP API */
+    {
+        L"wininet.dll", "InternetOpenW",
+        (LPVOID)Hooked_InternetOpenW, (LPVOID*)&Original_InternetOpenW,
+        "InternetOpenW()", false
+    },
+    {
+        L"wininet.dll", "InternetOpenA",
+        (LPVOID)Hooked_InternetOpenA, (LPVOID*)&Original_InternetOpenA,
+        "InternetOpenA()", false
     },
 
     /* Process hooks (for child injection) */

@@ -41,6 +41,12 @@ bool should_bypass(const ProxyFireConfig* config, uint32_t dest_ip, uint16_t des
     /* Always bypass link-local 169.254.0.0/16 */
     if (b[0] == 169 && b[1] == 254) return true;
 
+    /* Always bypass multicast 224.0.0.0/4 (224.x.x.x - 239.x.x.x) */
+    if ((b[0] & 0xF0) == 0xE0) return true;
+
+    /* Always bypass broadcast 255.255.255.255 */
+    if (dest_ip == 0xFFFFFFFF) return true;
+
     /* Bypass proxy server addresses themselves (prevent loops) */
     for (uint32_t i = 0; i < config->proxy_count; i++) {
         if (config->proxies[i].ip == dest_ip) {

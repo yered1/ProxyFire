@@ -15,6 +15,9 @@
 
 #include <proxyfire/config.h>
 
+#include <cstring>
+#include <string>
+
 #ifdef _WIN32
 #include <winsock2.h>
 #include <ws2tcpip.h>
@@ -32,11 +35,27 @@ int (WSAAPI *Original_WSAConnect)(SOCKET, const struct sockaddr*, int,
 int (WSAAPI *Original_closesocket)(SOCKET) = nullptr;
 int (WSAAPI *Original_WSAIoctl)(SOCKET, DWORD, LPVOID, DWORD, LPVOID, DWORD,
      LPDWORD, LPWSAOVERLAPPED, LPWSAOVERLAPPED_COMPLETION_ROUTINE) = nullptr;
+BOOL (WSAAPI *Original_WSAConnectByNameW)(SOCKET, LPWSTR, LPWSTR,
+     LPDWORD, LPSOCKADDR, LPDWORD, LPSOCKADDR,
+     const struct timeval*, LPWSAOVERLAPPED) = nullptr;
+BOOL (WSAAPI *Original_WSAConnectByNameA)(SOCKET, LPCSTR, LPCSTR,
+     LPDWORD, LPSOCKADDR, LPDWORD, LPSOCKADDR,
+     const struct timeval*, LPWSAOVERLAPPED) = nullptr;
 
 /* Real ConnectEx function pointer (discovered via WSAIoctl) */
 static LPFN_CONNECTEX Real_ConnectEx = nullptr;
 
 namespace proxyfire {
+
+/* Forward declaration for is_numeric_address (used by WSAConnectByName hooks) */
+static bool is_numeric_address(const char* str) {
+    if (!str) return false;
+    struct in_addr addr;
+    if (inet_pton(AF_INET, str, &addr) == 1) return true;
+    struct in6_addr addr6;
+    if (inet_pton(AF_INET6, str, &addr6) == 1) return true;
+    return false;
+}
 
 /*
  * Helper: query the current non-blocking state of a socket via getsockopt.
@@ -187,10 +206,10 @@ static int route_through_proxy(SOCKET s, const struct sockaddr* name, int namele
     /* Restore socket state */
     restore_socket_state(s, saved_state);
 
-    /* Track this socket */
-    socket_ctx_add(s, dest_ip, dest_port, hostname, result == 0);
-
-    if (result != 0) {
+    /* Track this socket only on success; don't leak context on failure */
+    if (result == 0) {
+        socket_ctx_add(s, dest_ip, dest_port, hostname, true);
+    } else {
         ipc_client_log(PF_LOG_ERROR, "Proxy connection failed for %s:%u",
                       hostname ? hostname : ip_to_string(dest_ip).c_str(),
                       dest_port);
@@ -347,6 +366,144 @@ int WSAAPI Hooked_WSAIoctl(SOCKET s, DWORD dwIoControlCode, LPVOID lpvInBuffer,
     return Original_WSAIoctl(s, dwIoControlCode, lpvInBuffer, cbInBuffer,
                               lpvOutBuffer, cbOutBuffer, lpcbBytesReturned,
                               lpOverlapped, lpCompletionRoutine);
+}
+
+/*
+ * Hooked WSAConnectByNameW()
+ *
+ * This API connects to a host by name, bypassing the normal
+ * getaddrinfo -> connect flow. We intercept it to route through proxy.
+ * The approach: resolve the hostname to a fake IP, then use our
+ * normal route_through_proxy path with the hostname passed through.
+ */
+BOOL WSAAPI Hooked_WSAConnectByNameW(SOCKET s, LPWSTR nodename, LPWSTR servicename,
+                                      LPDWORD LocalAddressLength, LPSOCKADDR LocalAddress,
+                                      LPDWORD RemoteAddressLength, LPSOCKADDR RemoteAddress,
+                                      const struct timeval* timeout, LPWSAOVERLAPPED Reserved)
+{
+    if (!nodename || g_config.proxy_count == 0) {
+        return Original_WSAConnectByNameW(s, nodename, servicename,
+                                           LocalAddressLength, LocalAddress,
+                                           RemoteAddressLength, RemoteAddress,
+                                           timeout, Reserved);
+    }
+
+    /* Convert wide name to narrow */
+    std::string host = to_narrow(std::wstring(nodename));
+    uint16_t port = 0;
+    if (servicename) {
+        port = (uint16_t)_wtoi(servicename);
+    }
+
+    /* Allocate fake IP and route through proxy */
+    uint32_t fake_ip = 0;
+    if (g_config.dns_leak_prevention && !is_numeric_address(host.c_str())) {
+        fake_ip = dns_faker_allocate(host.c_str());
+        if (fake_ip) {
+            ipc_client_dns_register(fake_ip, host.c_str());
+        }
+    } else {
+        /* Numeric address - parse it */
+        struct in_addr addr;
+        if (inet_pton(AF_INET, host.c_str(), &addr) == 1) {
+            fake_ip = addr.s_addr;
+        }
+    }
+
+    if (fake_ip == 0) {
+        /* Fallback to original if we can't handle it */
+        return Original_WSAConnectByNameW(s, nodename, servicename,
+                                           LocalAddressLength, LocalAddress,
+                                           RemoteAddressLength, RemoteAddress,
+                                           timeout, Reserved);
+    }
+
+    /* Build a sockaddr_in and use our proxy routing */
+    struct sockaddr_in dest_addr = {};
+    dest_addr.sin_family = AF_INET;
+    dest_addr.sin_addr.s_addr = fake_ip;
+    dest_addr.sin_port = htons(port);
+
+    int result = route_through_proxy(s, (struct sockaddr*)&dest_addr, sizeof(dest_addr));
+    if (result == -2) {
+        /* Bypass - use original */
+        return Original_WSAConnectByNameW(s, nodename, servicename,
+                                           LocalAddressLength, LocalAddress,
+                                           RemoteAddressLength, RemoteAddress,
+                                           timeout, Reserved);
+    }
+
+    if (result == 0) {
+        /* Fill in remote address if requested */
+        if (RemoteAddress && RemoteAddressLength && *RemoteAddressLength >= sizeof(struct sockaddr_in)) {
+            memcpy(RemoteAddress, &dest_addr, sizeof(struct sockaddr_in));
+            *RemoteAddressLength = sizeof(struct sockaddr_in);
+        }
+        return TRUE;
+    }
+
+    return FALSE;
+}
+
+BOOL WSAAPI Hooked_WSAConnectByNameA(SOCKET s, LPCSTR nodename, LPCSTR servicename,
+                                      LPDWORD LocalAddressLength, LPSOCKADDR LocalAddress,
+                                      LPDWORD RemoteAddressLength, LPSOCKADDR RemoteAddress,
+                                      const struct timeval* timeout, LPWSAOVERLAPPED Reserved)
+{
+    if (!nodename || g_config.proxy_count == 0) {
+        return Original_WSAConnectByNameA(s, nodename, servicename,
+                                           LocalAddressLength, LocalAddress,
+                                           RemoteAddressLength, RemoteAddress,
+                                           timeout, Reserved);
+    }
+
+    uint16_t port = 0;
+    if (servicename) {
+        port = (uint16_t)atoi(servicename);
+    }
+
+    uint32_t fake_ip = 0;
+    if (g_config.dns_leak_prevention && !is_numeric_address(nodename)) {
+        fake_ip = dns_faker_allocate(nodename);
+        if (fake_ip) {
+            ipc_client_dns_register(fake_ip, nodename);
+        }
+    } else {
+        struct in_addr addr;
+        if (inet_pton(AF_INET, nodename, &addr) == 1) {
+            fake_ip = addr.s_addr;
+        }
+    }
+
+    if (fake_ip == 0) {
+        return Original_WSAConnectByNameA(s, nodename, servicename,
+                                           LocalAddressLength, LocalAddress,
+                                           RemoteAddressLength, RemoteAddress,
+                                           timeout, Reserved);
+    }
+
+    struct sockaddr_in dest_addr = {};
+    dest_addr.sin_family = AF_INET;
+    dest_addr.sin_addr.s_addr = fake_ip;
+    dest_addr.sin_port = htons(port);
+
+    int result = route_through_proxy(s, (struct sockaddr*)&dest_addr, sizeof(dest_addr));
+    if (result == -2) {
+        return Original_WSAConnectByNameA(s, nodename, servicename,
+                                           LocalAddressLength, LocalAddress,
+                                           RemoteAddressLength, RemoteAddress,
+                                           timeout, Reserved);
+    }
+
+    if (result == 0) {
+        if (RemoteAddress && RemoteAddressLength && *RemoteAddressLength >= sizeof(struct sockaddr_in)) {
+            memcpy(RemoteAddress, &dest_addr, sizeof(struct sockaddr_in));
+            *RemoteAddressLength = sizeof(struct sockaddr_in);
+        }
+        return TRUE;
+    }
+
+    return FALSE;
 }
 
 /*

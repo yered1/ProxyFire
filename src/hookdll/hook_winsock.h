@@ -28,6 +28,16 @@ BOOL PASCAL Hooked_ConnectEx(SOCKET s, const struct sockaddr* name, int namelen,
                               PVOID lpSendBuffer, DWORD dwSendDataLength,
                               LPDWORD lpdwBytesSent, LPOVERLAPPED lpOverlapped);
 
+/* WSAConnectByName - connects by hostname, bypasses DNS hooks */
+BOOL WSAAPI Hooked_WSAConnectByNameW(SOCKET s, LPWSTR nodename, LPWSTR servicename,
+                                      LPDWORD LocalAddressLength, LPSOCKADDR LocalAddress,
+                                      LPDWORD RemoteAddressLength, LPSOCKADDR RemoteAddress,
+                                      const struct timeval* timeout, LPWSAOVERLAPPED Reserved);
+BOOL WSAAPI Hooked_WSAConnectByNameA(SOCKET s, LPCSTR nodename, LPCSTR servicename,
+                                      LPDWORD LocalAddressLength, LPSOCKADDR LocalAddress,
+                                      LPDWORD RemoteAddressLength, LPSOCKADDR RemoteAddress,
+                                      const struct timeval* timeout, LPWSAOVERLAPPED Reserved);
+
 } // namespace proxyfire
 
 /* Original function pointers - must be accessible from proxy_chain.cpp */
