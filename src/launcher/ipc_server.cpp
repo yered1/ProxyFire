@@ -131,6 +131,12 @@ static void handle_message(const uint8_t* data, size_t len) {
             if (header.payload_len >= sizeof(IpcLogMessage)) {
                 const IpcLogMessage* log_msg = (const IpcLogMessage*)payload;
                 const char* msg_text = (const char*)(payload + sizeof(IpcLogMessage));
+                size_t msg_max = header.payload_len - sizeof(IpcLogMessage);
+
+                /* Ensure null-termination within bounds */
+                if (msg_max == 0 || memchr(msg_text, '\0', msg_max) == nullptr) {
+                    break;
+                }
 
                 if (g_log_callback) {
                     g_log_callback(log_msg->level, log_msg->pid, msg_text);
@@ -152,6 +158,13 @@ static void handle_message(const uint8_t* data, size_t len) {
             if (header.payload_len >= sizeof(IpcDnsRegister)) {
                 const IpcDnsRegister* dns = (const IpcDnsRegister*)payload;
                 const char* hostname = (const char*)(payload + sizeof(IpcDnsRegister));
+                size_t hostname_max = header.payload_len - sizeof(IpcDnsRegister);
+
+                /* Ensure null-termination within bounds */
+                if (hostname_max == 0 || memchr(hostname, '\0', hostname_max) == nullptr) {
+                    break;
+                }
+
                 log_debug("DNS mapping: %s -> fake IP %u.%u.%u.%u",
                          hostname,
                          (dns->fake_ip) & 0xFF,

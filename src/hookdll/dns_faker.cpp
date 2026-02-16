@@ -126,9 +126,15 @@ const char* dns_faker_lookup(uint32_t fake_ip_network_order) {
     if (g_ip_to_hostname) {
         auto it = g_ip_to_hostname->find(ip_host);
         if (it != g_ip_to_hostname->end()) {
-            const char* result = it->second.c_str();
+            /*
+             * Copy to thread-local storage so the pointer remains valid after
+             * releasing the lock. Without this, concurrent map inserts could
+             * trigger a rehash, invalidating the returned c_str() pointer.
+             */
+            thread_local std::string tls_result;
+            tls_result = it->second;
             DNS_UNLOCK_READ();
-            return result;
+            return tls_result.c_str();
         }
     }
     DNS_UNLOCK_READ();
