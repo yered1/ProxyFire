@@ -1,0 +1,53 @@
+# ProxyFire Configuration File
+# Copy to proxyfire.toml and edit as needed.
+#
+# Usage: proxyfire --config proxyfire.toml -- <target.exe> [args...]
+
+[general]
+# Enable verbose logging (shows every connection attempt)
+verbose = false
+
+# DNS leak prevention: intercept DNS queries and resolve through SOCKS5 proxy
+# This prevents your real DNS from seeing which domains you connect to.
+dns_leak_prevention = true
+
+# Inject hook DLL into child processes spawned by the target
+inject_children = false
+
+# Log to file (leave empty for no file logging)
+# log_file = "proxyfire.log"
+
+# Log level: trace, debug, info, warn, error
+log_level = "info"
+
+# Proxy connection timeout in milliseconds
+timeout = 30000
+
+# Proxy chain - connections are tunneled through proxies in order.
+# Multiple [[proxy]] sections create a chain (multi-hop).
+
+[[proxy]]
+# SOCKS5 proxy with authentication
+# uri = "socks5://username:password@proxy-server.com:1080"
+
+# SOCKS5 proxy without authentication
+uri = "socks5://127.0.0.1:1080"
+
+# Uncomment to add a second hop (proxy chaining):
+# [[proxy]]
+# uri = "socks5://second-proxy.com:1080"
+
+# HTTP CONNECT proxy example:
+# [[proxy]]
+# uri = "http://user:pass@http-proxy.com:8080"
+
+# SOCKS4/4a proxy examples:
+# [[proxy]]
+# uri = "socks4://socks4-proxy.com:1080"
+# [[proxy]]
+# uri = "socks4a://socks4a-proxy.com:1080"
+
+[bypass]
+# Comma-separated CIDR rules for addresses that should NOT go through the proxy.
+# Loopback (127.0.0.0/8) is always bypassed automatically.
+rules = "10.0.0.0/8, 172.16.0.0/12, 192.168.0.0/16"

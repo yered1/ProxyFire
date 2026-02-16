@@ -1,0 +1,29 @@
+# Build directories
+build*/
+out/
+cmake-build-*/
+
+# IDE files
+.vs/
+.vscode/
+*.suo
+*.user
+*.sln.docstates
+.idea/
+
+# Compiled output
+*.exe
+*.dll
+*.lib
+*.obj
+*.o
+*.pdb
+*.ilk
+*.exp
+
+# OS files
+Thumbs.db
+.DS_Store
+
+# Config with credentials
+proxyfire.toml
