@@ -29,6 +29,8 @@
 /* Global config - set during DLL init */
 extern ProxyFireConfig g_config;
 
+namespace proxyfire {
+
 /* Original function pointers */
 int (WSAAPI *Original_connect)(SOCKET, const struct sockaddr*, int) = nullptr;
 int (WSAAPI *Original_WSAConnect)(SOCKET, const struct sockaddr*, int,
@@ -45,8 +47,6 @@ BOOL (WSAAPI *Original_WSAConnectByNameA)(SOCKET, LPCSTR, LPCSTR,
 
 /* Real ConnectEx function pointer (discovered via WSAIoctl) */
 static LPFN_CONNECTEX Real_ConnectEx = nullptr;
-
-namespace proxyfire {
 
 /* Forward declaration for is_numeric_address (used by WSAConnectByName hooks) */
 static bool is_numeric_address(const char* str) {

@@ -14,8 +14,6 @@
 #include <ws2tcpip.h>
 #pragma comment(lib, "ws2_32.lib")
 
-/* We need the original connect - declared in hook_winsock.h */
-extern int (WSAAPI *Original_connect)(SOCKET s, const struct sockaddr* name, int namelen);
 #else
 #include <sys/socket.h>
 #include <netinet/in.h>
@@ -24,6 +22,11 @@ static int (*Original_connect)(int s, const struct sockaddr* name, int namelen) 
 #endif
 
 namespace proxyfire {
+
+#ifdef _WIN32
+/* We need the original connect - declared in hook_winsock.cpp */
+extern int (WSAAPI *Original_connect)(SOCKET s, const struct sockaddr* name, int namelen);
+#endif
 
 bool should_bypass(const ProxyFireConfig* config, uint32_t dest_ip, uint16_t dest_port) {
     (void)dest_port;

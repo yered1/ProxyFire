@@ -43,6 +43,8 @@
 /* Global config - set during DLL init */
 extern ProxyFireConfig g_config;
 
+namespace proxyfire {
+
 /* Original function pointers */
 void* (WINAPI *Original_WinHttpOpen)(const wchar_t*, DWORD,
        const wchar_t*, const wchar_t*, DWORD) = nullptr;
@@ -52,8 +54,6 @@ void* (WINAPI *Original_InternetOpenW)(const wchar_t*, DWORD,
        const wchar_t*, const wchar_t*, DWORD) = nullptr;
 void* (WINAPI *Original_InternetOpenA)(const char*, DWORD,
        const char*, const char*, DWORD) = nullptr;
-
-namespace proxyfire {
 
 /*
  * Build the proxy string for WinHTTP from the first configured proxy.

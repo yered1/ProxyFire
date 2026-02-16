@@ -38,6 +38,8 @@
 /* Global config - set during DLL init */
 extern ProxyFireConfig g_config;
 
+namespace proxyfire {
+
 /* Original function pointers - sendto/WSASendTo */
 int (WSAAPI *Original_sendto)(SOCKET, const char*, int, int,
      const struct sockaddr*, int) = nullptr;
@@ -51,8 +53,6 @@ int (WSAAPI *Original_recvfrom)(SOCKET, char*, int, int,
 int (WSAAPI *Original_WSARecvFrom)(SOCKET, LPWSABUF, DWORD, LPDWORD, LPDWORD,
      struct sockaddr*, LPINT, LPWSAOVERLAPPED,
      LPWSAOVERLAPPED_COMPLETION_ROUTINE) = nullptr;
-
-namespace proxyfire {
 
 /* ------------------------------------------------------------------ */
 /* Helpers                                                             */

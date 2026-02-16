@@ -38,9 +38,9 @@ BOOL WSAAPI Hooked_WSAConnectByNameA(SOCKET s, LPCSTR nodename, LPCSTR servicena
                                       LPDWORD RemoteAddressLength, LPSOCKADDR RemoteAddress,
                                       const struct timeval* timeout, LPWSAOVERLAPPED Reserved);
 
-} // namespace proxyfire
-
 /* Original function pointers - must be accessible from proxy_chain.cpp */
 extern int (WSAAPI *Original_connect)(SOCKET, const struct sockaddr*, int);
+
+} // namespace proxyfire
 
 #endif

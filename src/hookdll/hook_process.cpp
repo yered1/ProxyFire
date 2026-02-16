@@ -21,6 +21,8 @@
 
 extern ProxyFireConfig g_config;
 
+namespace proxyfire {
+
 /* Original function pointers */
 BOOL (WINAPI *Original_CreateProcessW)(LPCWSTR, LPWSTR,
       LPSECURITY_ATTRIBUTES, LPSECURITY_ATTRIBUTES, BOOL, DWORD,
@@ -28,8 +30,6 @@ BOOL (WINAPI *Original_CreateProcessW)(LPCWSTR, LPWSTR,
 BOOL (WINAPI *Original_CreateProcessA)(LPCSTR, LPSTR,
       LPSECURITY_ATTRIBUTES, LPSECURITY_ATTRIBUTES, BOOL, DWORD,
       LPVOID, LPCSTR, LPSTARTUPINFOA, LPPROCESS_INFORMATION) = nullptr;
-
-namespace proxyfire {
 
 /*
  * Helper: Inject the hook DLL into a suspended child process.

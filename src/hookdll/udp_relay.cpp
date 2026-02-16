@@ -36,21 +36,18 @@
 
 #pragma comment(lib, "ws2_32.lib")
 
-/* Original connect - declared in hook_winsock.cpp, needed to avoid recursive hooks */
-extern int (WSAAPI *Original_connect)(SOCKET, const struct sockaddr*, int);
-
-/* Original sendto - declared in hook_udp.cpp, needed to avoid recursive hooks */
-extern int (WSAAPI *Original_sendto)(SOCKET, const char*, int, int,
-                                      const struct sockaddr*, int);
-
-/* Original recvfrom - declared in hook_udp.cpp, needed to avoid recursive hooks */
-extern int (WSAAPI *Original_recvfrom)(SOCKET, char*, int, int,
-                                        struct sockaddr*, int*);
-
 /* Global config - set during DLL init */
 extern ProxyFireConfig g_config;
 
 namespace proxyfire {
+
+/* Original function pointers - declared in hook_winsock.cpp / hook_udp.cpp,
+ * needed to avoid recursive hooks when sending/receiving through the relay */
+extern int (WSAAPI *Original_connect)(SOCKET, const struct sockaddr*, int);
+extern int (WSAAPI *Original_sendto)(SOCKET, const char*, int, int,
+                                      const struct sockaddr*, int);
+extern int (WSAAPI *Original_recvfrom)(SOCKET, char*, int, int,
+                                        struct sockaddr*, int*);
 
 /* Maximum UDP datagram size including SOCKS5 header overhead */
 static const int UDP_RELAY_BUFSIZE = 65536;

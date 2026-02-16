@@ -26,6 +26,8 @@
 
 extern ProxyFireConfig g_config;
 
+namespace proxyfire {
+
 /* Original function pointers */
 int (WSAAPI *Original_getaddrinfo)(const char*, const char*,
      const struct addrinfo*, struct addrinfo**) = nullptr;
@@ -35,8 +37,6 @@ struct hostent* (WSAAPI *Original_gethostbyname)(const char*) = nullptr;
 int (WSAAPI *Original_GetAddrInfoExW)(const wchar_t*, const wchar_t*,
      DWORD, LPGUID, const ADDRINFOEXW*, PADDRINFOEXW*, struct timeval*,
      LPOVERLAPPED, LPLOOKUPSERVICE_COMPLETION_ROUTINE, LPHANDLE) = nullptr;
-
-namespace proxyfire {
 
 /*
  * Check if a hostname is localhost or a localhost variant.
