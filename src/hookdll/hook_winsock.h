@@ -8,6 +8,7 @@
 #ifdef _WIN32
 #include <winsock2.h>
 #include <ws2tcpip.h>
+#include <mswsock.h>
 
 namespace proxyfire {
 
@@ -17,10 +18,29 @@ int WSAAPI Hooked_WSAConnect(SOCKET s, const struct sockaddr* name, int namelen,
                               LPWSABUF lpCallerData, LPWSABUF lpCalleeData,
                               LPQOS lpSQOS, LPQOS lpGQOS);
 int WSAAPI Hooked_closesocket(SOCKET s);
+int WSAAPI Hooked_WSAIoctl(SOCKET s, DWORD dwIoControlCode, LPVOID lpvInBuffer,
+                            DWORD cbInBuffer, LPVOID lpvOutBuffer, DWORD cbOutBuffer,
+                            LPDWORD lpcbBytesReturned, LPWSAOVERLAPPED lpOverlapped,
+                            LPWSAOVERLAPPED_COMPLETION_ROUTINE lpCompletionRoutine);
 
-} // namespace proxyfire
+/* Internal ConnectEx hook (installed dynamically via WSAIoctl interception) */
+BOOL PASCAL Hooked_ConnectEx(SOCKET s, const struct sockaddr* name, int namelen,
+                              PVOID lpSendBuffer, DWORD dwSendDataLength,
+                              LPDWORD lpdwBytesSent, LPOVERLAPPED lpOverlapped);
+
+/* WSAConnectByName - connects by hostname, bypasses DNS hooks */
+BOOL WSAAPI Hooked_WSAConnectByNameW(SOCKET s, LPWSTR nodename, LPWSTR servicename,
+                                      LPDWORD LocalAddressLength, LPSOCKADDR LocalAddress,
+                                      LPDWORD RemoteAddressLength, LPSOCKADDR RemoteAddress,
+                                      const struct timeval* timeout, LPWSAOVERLAPPED Reserved);
+BOOL WSAAPI Hooked_WSAConnectByNameA(SOCKET s, LPCSTR nodename, LPCSTR servicename,
+                                      LPDWORD LocalAddressLength, LPSOCKADDR LocalAddress,
+                                      LPDWORD RemoteAddressLength, LPSOCKADDR RemoteAddress,
+                                      const struct timeval* timeout, LPWSAOVERLAPPED Reserved);
 
 /* Original function pointers - must be accessible from proxy_chain.cpp */
 extern int (WSAAPI *Original_connect)(SOCKET, const struct sockaddr*, int);
+
+} // namespace proxyfire
 
 #endif

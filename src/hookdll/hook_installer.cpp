@@ -7,6 +7,8 @@
 #include "hook_winsock.h"
 #include "hook_dns.h"
 #include "hook_process.h"
+#include "hook_winhttp.h"
+#include "hook_udp.h"
 #include "ipc_client.h"
 
 #include <MinHook.h>
@@ -24,6 +26,7 @@ struct HookEntry {
     LPVOID         detour;
     LPVOID*        original;
     const char*    description;
+    bool           critical;     /* If true, failure aborts initialization */
 };
 
 /* Original function pointers - defined in respective hook files */
@@ -33,6 +36,26 @@ extern int     (WSAAPI *Original_connect)(SOCKET, const struct sockaddr*, int);
 extern int     (WSAAPI *Original_WSAConnect)(SOCKET, const struct sockaddr*, int,
                 LPWSABUF, LPWSABUF, LPQOS, LPQOS);
 extern int     (WSAAPI *Original_closesocket)(SOCKET);
+extern int     (WSAAPI *Original_WSAIoctl)(SOCKET, DWORD, LPVOID, DWORD, LPVOID, DWORD,
+                LPDWORD, LPWSAOVERLAPPED, LPWSAOVERLAPPED_COMPLETION_ROUTINE);
+extern BOOL    (WSAAPI *Original_WSAConnectByNameW)(SOCKET, LPWSTR, LPWSTR,
+                LPDWORD, LPSOCKADDR, LPDWORD, LPSOCKADDR,
+                const struct timeval*, LPWSAOVERLAPPED);
+extern BOOL    (WSAAPI *Original_WSAConnectByNameA)(SOCKET, LPCSTR, LPCSTR,
+                LPDWORD, LPSOCKADDR, LPDWORD, LPSOCKADDR,
+                const struct timeval*, LPWSAOVERLAPPED);
+
+/* UDP hooks */
+extern int     (WSAAPI *Original_sendto)(SOCKET, const char*, int, int,
+                const struct sockaddr*, int);
+extern int     (WSAAPI *Original_WSASendTo)(SOCKET, LPWSABUF, DWORD, LPDWORD, DWORD,
+                const struct sockaddr*, int, LPWSAOVERLAPPED,
+                LPWSAOVERLAPPED_COMPLETION_ROUTINE);
+extern int     (WSAAPI *Original_recvfrom)(SOCKET, char*, int, int,
+                struct sockaddr*, int*);
+extern int     (WSAAPI *Original_WSARecvFrom)(SOCKET, LPWSABUF, DWORD, LPDWORD, LPDWORD,
+                struct sockaddr*, LPINT, LPWSAOVERLAPPED,
+                LPWSAOVERLAPPED_COMPLETION_ROUTINE);
 
 /* DNS hooks */
 extern int     (WSAAPI *Original_getaddrinfo)(const char*, const char*,
@@ -40,6 +63,20 @@ extern int     (WSAAPI *Original_getaddrinfo)(const char*, const char*,
 extern int     (WSAAPI *Original_GetAddrInfoW)(const wchar_t*, const wchar_t*,
                 const ADDRINFOW*, ADDRINFOW**);
 extern struct hostent* (WSAAPI *Original_gethostbyname)(const char*);
+extern int     (WSAAPI *Original_GetAddrInfoExW)(const wchar_t*, const wchar_t*,
+                DWORD, LPGUID, const ADDRINFOEXW*, PADDRINFOEXW*, struct timeval*,
+                LPOVERLAPPED, LPLOOKUPSERVICE_COMPLETION_ROUTINE, LPHANDLE);
+
+/* WinHTTP hooks */
+extern void*   (WINAPI *Original_WinHttpOpen)(const wchar_t*, DWORD,
+                const wchar_t*, const wchar_t*, DWORD);
+extern int     (WINAPI *Original_WinHttpSetOption)(void*, DWORD, void*, DWORD);
+
+/* WinINet hooks */
+extern void*   (WINAPI *Original_InternetOpenW)(const wchar_t*, DWORD,
+                const wchar_t*, const wchar_t*, DWORD);
+extern void*   (WINAPI *Original_InternetOpenA)(const char*, DWORD,
+                const char*, const char*, DWORD);
 
 /* Process hooks */
 extern BOOL    (WINAPI *Original_CreateProcessW)(LPCWSTR, LPWSTR,
@@ -50,50 +87,119 @@ extern BOOL    (WINAPI *Original_CreateProcessA)(LPCSTR, LPSTR,
                 LPVOID, LPCSTR, LPSTARTUPINFOA, LPPROCESS_INFORMATION);
 
 static HookEntry g_hooks[] = {
-    /* Winsock connection hooks */
+    /* Winsock connection hooks - CRITICAL */
     {
         L"ws2_32.dll", "connect",
         (LPVOID)Hooked_connect, (LPVOID*)&Original_connect,
-        "connect()"
+        "connect()", true
     },
     {
         L"ws2_32.dll", "WSAConnect",
         (LPVOID)Hooked_WSAConnect, (LPVOID*)&Original_WSAConnect,
-        "WSAConnect()"
+        "WSAConnect()", true
     },
     {
         L"ws2_32.dll", "closesocket",
         (LPVOID)Hooked_closesocket, (LPVOID*)&Original_closesocket,
-        "closesocket()"
+        "closesocket()", true
+    },
+    /* WSAIoctl - needed to intercept ConnectEx function pointer requests */
+    {
+        L"ws2_32.dll", "WSAIoctl",
+        (LPVOID)Hooked_WSAIoctl, (LPVOID*)&Original_WSAIoctl,
+        "WSAIoctl()", false
+    },
+    /* WSAConnectByName - connects by hostname, bypasses getaddrinfo+connect */
+    {
+        L"ws2_32.dll", "WSAConnectByNameW",
+        (LPVOID)Hooked_WSAConnectByNameW, (LPVOID*)&Original_WSAConnectByNameW,
+        "WSAConnectByNameW()", false
+    },
+    {
+        L"ws2_32.dll", "WSAConnectByNameA",
+        (LPVOID)Hooked_WSAConnectByNameA, (LPVOID*)&Original_WSAConnectByNameA,
+        "WSAConnectByNameA()", false
+    },
+
+    /* UDP hooks - SOCKS5 UDP ASSOCIATE relay + DNS leak prevention */
+    {
+        L"ws2_32.dll", "sendto",
+        (LPVOID)Hooked_sendto, (LPVOID*)&Original_sendto,
+        "sendto()", false
+    },
+    {
+        L"ws2_32.dll", "WSASendTo",
+        (LPVOID)Hooked_WSASendTo, (LPVOID*)&Original_WSASendTo,
+        "WSASendTo()", false
+    },
+    {
+        L"ws2_32.dll", "recvfrom",
+        (LPVOID)Hooked_recvfrom, (LPVOID*)&Original_recvfrom,
+        "recvfrom()", false
+    },
+    {
+        L"ws2_32.dll", "WSARecvFrom",
+        (LPVOID)Hooked_WSARecvFrom, (LPVOID*)&Original_WSARecvFrom,
+        "WSARecvFrom()", false
     },
 
     /* DNS hooks */
     {
         L"ws2_32.dll", "getaddrinfo",
         (LPVOID)Hooked_getaddrinfo, (LPVOID*)&Original_getaddrinfo,
-        "getaddrinfo()"
+        "getaddrinfo()", false
     },
     {
         L"ws2_32.dll", "GetAddrInfoW",
         (LPVOID)Hooked_GetAddrInfoW, (LPVOID*)&Original_GetAddrInfoW,
-        "GetAddrInfoW()"
+        "GetAddrInfoW()", false
     },
     {
         L"ws2_32.dll", "gethostbyname",
         (LPVOID)Hooked_gethostbyname, (LPVOID*)&Original_gethostbyname,
-        "gethostbyname()"
+        "gethostbyname()", false
+    },
+    /* Async DNS - GetAddrInfoExW (used by modern Windows apps) */
+    {
+        L"ws2_32.dll", "GetAddrInfoExW",
+        (LPVOID)Hooked_GetAddrInfoExW, (LPVOID*)&Original_GetAddrInfoExW,
+        "GetAddrInfoExW()", false
+    },
+
+    /* WinHTTP hooks - force proxy settings on higher-level HTTP API */
+    {
+        L"winhttp.dll", "WinHttpOpen",
+        (LPVOID)Hooked_WinHttpOpen, (LPVOID*)&Original_WinHttpOpen,
+        "WinHttpOpen()", false
+    },
+    {
+        L"winhttp.dll", "WinHttpSetOption",
+        (LPVOID)Hooked_WinHttpSetOption, (LPVOID*)&Original_WinHttpSetOption,
+        "WinHttpSetOption()", false
+    },
+
+    /* WinINet hooks - force proxy settings on Internet Explorer HTTP API */
+    {
+        L"wininet.dll", "InternetOpenW",
+        (LPVOID)Hooked_InternetOpenW, (LPVOID*)&Original_InternetOpenW,
+        "InternetOpenW()", false
+    },
+    {
+        L"wininet.dll", "InternetOpenA",
+        (LPVOID)Hooked_InternetOpenA, (LPVOID*)&Original_InternetOpenA,
+        "InternetOpenA()", false
     },
 
     /* Process hooks (for child injection) */
     {
         L"kernel32.dll", "CreateProcessW",
         (LPVOID)Hooked_CreateProcessW, (LPVOID*)&Original_CreateProcessW,
-        "CreateProcessW()"
+        "CreateProcessW()", false
     },
     {
         L"kernel32.dll", "CreateProcessA",
         (LPVOID)Hooked_CreateProcessA, (LPVOID*)&Original_CreateProcessA,
-        "CreateProcessA()"
+        "CreateProcessA()", false
     },
 };
 
@@ -110,16 +216,17 @@ bool install_all_hooks() {
             g_hooks[i].original
         );
 
-        if (status != MH_OK && status != MH_ERROR_MODULE_NOT_FOUND) {
+        if (status != MH_OK && status != MH_ERROR_MODULE_NOT_FOUND &&
+            status != MH_ERROR_FUNCTION_NOT_FOUND) {
             ipc_client_log(PF_LOG_WARN, "Failed to hook %s: %s",
                           g_hooks[i].description, MH_StatusToString(status));
-            /* Non-critical hooks (like CreateProcess) can fail */
-            if (i < 3) {
-                /* Connection hooks are critical */
+            if (g_hooks[i].critical) {
                 all_ok = false;
             }
         } else if (status == MH_OK) {
             ipc_client_log(PF_LOG_DEBUG, "Hooked %s", g_hooks[i].description);
+        } else {
+            ipc_client_log(PF_LOG_DEBUG, "Skipped %s (not found)", g_hooks[i].description);
         }
     }
 

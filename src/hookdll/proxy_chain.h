@@ -29,6 +29,7 @@ namespace proxyfire {
  * @param dest_ip       Final destination IP (network byte order)
  * @param dest_port     Final destination port (host byte order)
  * @param dest_hostname Final destination hostname (NULL if IP-only)
+ * @param dest_ipv6     16-byte IPv6 address (NULL if not IPv6)
  *
  * @return 0 on success, SOCKET_ERROR on failure
  */
@@ -37,7 +38,8 @@ int proxy_chain_connect(
     const ProxyFireConfig* config,
     uint32_t            dest_ip,
     uint16_t            dest_port,
-    const char*         dest_hostname
+    const char*         dest_hostname,
+    const uint8_t*      dest_ipv6 = nullptr
 );
 
 /**

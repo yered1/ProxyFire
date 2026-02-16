@@ -12,6 +12,7 @@
 #include "ipc_server.h"
 #include "ipc_messages.h"
 #include "logger.h"
+#include "string_utils.h"
 
 #include <proxyfire/common.h>
 #include <proxyfire/ipc_protocol.h>
@@ -20,6 +21,9 @@
 
 #ifdef _WIN32
 #include <windows.h>
+#include <sddl.h>
+
+#pragma comment(lib, "advapi32.lib")
 
 namespace proxyfire {
 
@@ -45,6 +49,32 @@ std::wstring ipc_server_start(const ProxyFireConfig* config, LogCallback log_cb)
     /* Create stop event */
     g_stop_event = CreateEventW(nullptr, TRUE, FALSE, nullptr);
 
+    /*
+     * Create a security descriptor that restricts pipe access to the current
+     * user and SYSTEM only. This prevents other users/processes from connecting
+     * to steal proxy credentials or inject false configurations.
+     */
+    SECURITY_ATTRIBUTES sa = {};
+    SECURITY_DESCRIPTOR sd = {};
+    PSECURITY_DESCRIPTOR psd = nullptr;
+    bool have_acl = false;
+
+    /* Build a DACL string: Allow full access to Owner and SYSTEM only */
+    /* D:P = DACL with PROTECTED flag
+     * (A;;GA;;;OW) = Allow Generic All to Owner
+     * (A;;GA;;;SY) = Allow Generic All to SYSTEM */
+    if (ConvertStringSecurityDescriptorToSecurityDescriptorW(
+            L"D:P(A;;GA;;;OW)(A;;GA;;;SY)",
+            SDDL_REVISION_1, &psd, nullptr)) {
+        sa.nLength = sizeof(SECURITY_ATTRIBUTES);
+        sa.lpSecurityDescriptor = psd;
+        sa.bInheritHandle = FALSE;
+        have_acl = true;
+    } else {
+        log_warn("Failed to create pipe ACL (error %lu), pipe will use default security",
+                 GetLastError());
+    }
+
     /* Create the named pipe */
     g_pipe = CreateNamedPipeW(
         g_pipe_name.c_str(),
@@ -54,8 +84,10 @@ std::wstring ipc_server_start(const ProxyFireConfig* config, LogCallback log_cb)
         (DWORD)IPC_MAX_MSG_SIZE,
         (DWORD)IPC_MAX_MSG_SIZE,
         0,
-        nullptr
+        have_acl ? &sa : nullptr
     );
+
+    if (psd) LocalFree(psd);
 
     if (g_pipe == INVALID_HANDLE_VALUE) {
         log_error("CreateNamedPipeW failed: %s",
@@ -100,6 +132,12 @@ static void handle_message(const uint8_t* data, size_t len) {
             if (header.payload_len >= sizeof(IpcLogMessage)) {
                 const IpcLogMessage* log_msg = (const IpcLogMessage*)payload;
                 const char* msg_text = (const char*)(payload + sizeof(IpcLogMessage));
+                size_t msg_max = header.payload_len - sizeof(IpcLogMessage);
+
+                /* Ensure null-termination within bounds */
+                if (msg_max == 0 || memchr(msg_text, '\0', msg_max) == nullptr) {
+                    break;
+                }
 
                 if (g_log_callback) {
                     g_log_callback(log_msg->level, log_msg->pid, msg_text);
@@ -121,6 +159,13 @@ static void handle_message(const uint8_t* data, size_t len) {
             if (header.payload_len >= sizeof(IpcDnsRegister)) {
                 const IpcDnsRegister* dns = (const IpcDnsRegister*)payload;
                 const char* hostname = (const char*)(payload + sizeof(IpcDnsRegister));
+                size_t hostname_max = header.payload_len - sizeof(IpcDnsRegister);
+
+                /* Ensure null-termination within bounds */
+                if (hostname_max == 0 || memchr(hostname, '\0', hostname_max) == nullptr) {
+                    break;
+                }
+
                 log_debug("DNS mapping: %s -> fake IP %u.%u.%u.%u",
                          hostname,
                          (dns->fake_ip) & 0xFF,
@@ -182,8 +227,19 @@ void ipc_server_run() {
         /* Disconnect and prepare for next client */
         DisconnectNamedPipe(g_pipe);
 
-        /* Recreate pipe for next client */
+        /* Recreate pipe for next client with same ACL */
         CloseHandle(g_pipe);
+        PSECURITY_DESCRIPTOR psd2 = nullptr;
+        SECURITY_ATTRIBUTES sa2 = {};
+        bool have_acl2 = false;
+        if (ConvertStringSecurityDescriptorToSecurityDescriptorW(
+                L"D:P(A;;GA;;;OW)(A;;GA;;;SY)",
+                SDDL_REVISION_1, &psd2, nullptr)) {
+            sa2.nLength = sizeof(SECURITY_ATTRIBUTES);
+            sa2.lpSecurityDescriptor = psd2;
+            sa2.bInheritHandle = FALSE;
+            have_acl2 = true;
+        }
         g_pipe = CreateNamedPipeW(
             g_pipe_name.c_str(),
             PIPE_ACCESS_DUPLEX | FILE_FLAG_OVERLAPPED,
@@ -192,8 +248,9 @@ void ipc_server_run() {
             (DWORD)IPC_MAX_MSG_SIZE,
             (DWORD)IPC_MAX_MSG_SIZE,
             0,
-            nullptr
+            have_acl2 ? &sa2 : nullptr
         );
+        if (psd2) LocalFree(psd2);
     }
 }
 

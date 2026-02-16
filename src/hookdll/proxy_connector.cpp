@@ -14,10 +14,12 @@
 #include <string>
 
 #ifdef _WIN32
+#include <windows.h>
 #include <winsock2.h>
 #include <ws2tcpip.h>
 #pragma comment(lib, "ws2_32.lib")
 #else
+#define SecureZeroMemory(p, s) memset(p, 0, s)
 #include <sys/socket.h>
 #include <netinet/in.h>
 #include <arpa/inet.h>
@@ -135,7 +137,8 @@ static int recv_line(SOCKET sock, char* buf, int maxlen, uint32_t timeout_ms) {
  */
 int socks5_handshake(
     SOCKET sock, const char* dest_host, uint32_t dest_ip, uint16_t dest_port,
-    const char* username, const char* password, uint32_t timeout_ms)
+    const char* username, const char* password, uint32_t timeout_ms,
+    const uint8_t* dest_ipv6)
 {
     uint8_t buf[512];
     bool need_auth = (username && username[0] != '\0');
@@ -224,9 +227,20 @@ int socks5_handshake(
     buf[pos++] = SOCKS5_CMD_CONNECT;    /* Command: CONNECT */
     buf[pos++] = 0x00;                  /* Reserved */
 
-    if (dest_host && dest_host[0] != '\0') {
+    if (dest_ipv6) {
+        /* Use IPv6 address (16 bytes) */
+        buf[pos++] = SOCKS5_ATYP_IPV6;
+        memcpy(buf + pos, dest_ipv6, 16);
+        pos += 16;
+    } else if (dest_host && dest_host[0] != '\0') {
         /* Use domain name (remote DNS resolution) */
-        uint8_t dlen = (uint8_t)strlen(dest_host);
+        size_t host_len = strlen(dest_host);
+        if (host_len > 255) {
+            /* SOCKS5 domain length is a single byte - max 255 */
+            WSASetLastError(WSAENAMETOOLONG);
+            return -1;
+        }
+        uint8_t dlen = (uint8_t)host_len;
         buf[pos++] = SOCKS5_ATYP_DOMAIN;
         buf[pos++] = dlen;
         memcpy(buf + pos, dest_host, dlen);
@@ -404,6 +418,11 @@ int socks4a_handshake(
     /* Append hostname for SOCKS4a */
     if (dest_host && dest_host[0] != '\0') {
         size_t hlen = strlen(dest_host);
+        if (pos + hlen + 1 > sizeof(buf)) {
+            /* Hostname too long for SOCKS4a packet buffer */
+            WSASetLastError(WSAENAMETOOLONG);
+            return -1;
+        }
         memcpy(buf + pos, dest_host, hlen);
         pos += (int)hlen;
         buf[pos++] = 0x00;  /* Null terminator for hostname */
@@ -444,11 +463,17 @@ int socks4a_handshake(
  */
 int http_connect_handshake(
     SOCKET sock, const char* dest_host, uint32_t dest_ip, uint16_t dest_port,
-    const char* username, const char* password, uint32_t timeout_ms)
+    const char* username, const char* password, uint32_t timeout_ms,
+    const uint8_t* dest_ipv6)
 {
     /* Build target string */
     std::string target;
-    if (dest_host && dest_host[0] != '\0') {
+    if (dest_ipv6) {
+        /* IPv6: use bracket notation [addr]:port */
+        char ipv6_str[INET6_ADDRSTRLEN];
+        inet_ntop(AF_INET6, dest_ipv6, ipv6_str, sizeof(ipv6_str));
+        target = "[" + std::string(ipv6_str) + "]:" + std::to_string(dest_port);
+    } else if (dest_host && dest_host[0] != '\0') {
         target = std::string(dest_host) + ":" + std::to_string(dest_port);
     } else {
         target = ip_to_string(dest_ip) + ":" + std::to_string(dest_port);
@@ -465,7 +490,11 @@ int http_connect_handshake(
         if (password && password[0] != '\0') {
             credentials += ":" + std::string(password);
         }
-        request += "Proxy-Authorization: Basic " + base64_encode(credentials) + "\r\n";
+        std::string encoded = base64_encode(credentials);
+        request += "Proxy-Authorization: Basic " + encoded + "\r\n";
+        /* Securely clear credentials from memory */
+        SecureZeroMemory(&credentials[0], credentials.size());
+        SecureZeroMemory(&encoded[0], encoded.size());
     }
 
     request += "Proxy-Connection: keep-alive\r\n";
@@ -483,24 +512,36 @@ int http_connect_handshake(
         return -1;
     }
 
-    /* Parse HTTP status code */
+    /*
+     * Parse HTTP status code from status line.
+     * Accept both HTTP/1.x and HTTP/2 response formats.
+     * Format: "HTTP/X.Y NNN reason\r\n" or "HTTP/X NNN reason\r\n"
+     */
     int status_code = 0;
-    if (strncmp(line, "HTTP/1.", 7) == 0 && strlen(line) > 9) {
-        status_code = atoi(line + 9);
+    if (strncmp(line, "HTTP/", 5) == 0) {
+        /* Find the space before the status code */
+        const char* space = strchr(line + 5, ' ');
+        if (space) {
+            status_code = atoi(space + 1);
+        }
     }
 
-    if (status_code != 200) {
+    if (status_code < 200 || status_code >= 300) {
         if (status_code == 407) {
             /* Proxy authentication required */
-            WSASetLastError(WSAECONNREFUSED);
+            WSASetLastError(WSAEACCES);
+        } else if (status_code == 403) {
+            WSASetLastError(WSAEACCES);
         } else {
             WSASetLastError(WSAECONNREFUSED);
         }
         return -1;
     }
 
-    /* Read remaining headers until empty line */
-    while (true) {
+    /* Read remaining headers until empty line.
+     * Limit to 64 headers to prevent infinite loops from malformed proxies. */
+    int max_headers = 64;
+    while (max_headers-- > 0) {
         if (recv_line(sock, line, sizeof(line), timeout_ms) < 0) {
             WSASetLastError(WSAECONNREFUSED);
             return -1;
@@ -525,12 +566,13 @@ int proxy_handshake(
     uint16_t        dest_port,
     const char*     username,
     const char*     password,
-    uint32_t        timeout_ms)
+    uint32_t        timeout_ms,
+    const uint8_t*  dest_ipv6)
 {
     switch (proto) {
         case PROXY_SOCKS5:
             return socks5_handshake(sock, dest_host, dest_ip, dest_port,
-                                    username, password, timeout_ms);
+                                    username, password, timeout_ms, dest_ipv6);
 
         case PROXY_SOCKS4:
             return socks4_handshake(sock, dest_ip, dest_port,
@@ -542,7 +584,8 @@ int proxy_handshake(
 
         case PROXY_HTTP:
             return http_connect_handshake(sock, dest_host, dest_ip, dest_port,
-                                          username, password, timeout_ms);
+                                          username, password, timeout_ms,
+                                          dest_ipv6);
 
         default:
             WSASetLastError(WSAECONNREFUSED);

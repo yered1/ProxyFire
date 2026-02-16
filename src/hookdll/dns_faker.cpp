@@ -92,6 +92,19 @@ uint32_t dns_faker_allocate(const char* hostname) {
         return 0;
     }
 
+    /*
+     * Memory management: if maps grow beyond 100k entries, clear and
+     * restart. This prevents unbounded memory growth in long-running
+     * processes that resolve many unique hostnames. The trade-off is
+     * that previously cached hostnames need re-allocation, but this
+     * is acceptable since the proxy handles DNS resolution anyway.
+     */
+    if (g_hostname_to_ip && g_hostname_to_ip->size() > 100000) {
+        g_hostname_to_ip->clear();
+        g_ip_to_hostname->clear();
+        g_next_fake_ip = PROXYFIRE_FAKE_IP_BASE;
+    }
+
     uint32_t fake_ip_host = g_next_fake_ip++;
 
     if (g_hostname_to_ip) {
@@ -113,9 +126,15 @@ const char* dns_faker_lookup(uint32_t fake_ip_network_order) {
     if (g_ip_to_hostname) {
         auto it = g_ip_to_hostname->find(ip_host);
         if (it != g_ip_to_hostname->end()) {
-            const char* result = it->second.c_str();
+            /*
+             * Copy to thread-local storage so the pointer remains valid after
+             * releasing the lock. Without this, concurrent map inserts could
+             * trigger a rehash, invalidating the returned c_str() pointer.
+             */
+            thread_local std::string tls_result;
+            tls_result = it->second;
             DNS_UNLOCK_READ();
-            return result;
+            return tls_result.c_str();
         }
     }
     DNS_UNLOCK_READ();

@@ -34,8 +34,10 @@
 #ifdef _WIN32
 #include <winsock2.h>
 #include <ws2tcpip.h>
+#include <shellapi.h>
 #pragma comment(lib, "ws2_32.lib")
 #pragma comment(lib, "shlwapi.lib")
+#pragma comment(lib, "shell32.lib")
 #endif
 
 using namespace proxyfire;
@@ -69,6 +71,114 @@ static void print_config_summary(const ProxyFireConfig& config) {
         log_info("  Bypass rules: %u", config.bypass_count);
     }
 }
+
+#ifdef _WIN32
+/*
+ * Check if the current process is running with administrator privileges.
+ */
+static bool is_elevated() {
+    BOOL elevated = FALSE;
+    HANDLE token = nullptr;
+    if (OpenProcessToken(GetCurrentProcess(), TOKEN_QUERY, &token)) {
+        TOKEN_ELEVATION elev;
+        DWORD size = sizeof(elev);
+        if (GetTokenInformation(token, TokenElevation, &elev, sizeof(elev), &size)) {
+            elevated = elev.TokenIsElevated;
+        }
+        CloseHandle(token);
+    }
+    return elevated != FALSE;
+}
+
+/*
+ * Re-launch proxyfire.exe with administrator privileges using ShellExecuteEx "runas".
+ * Reconstructs the original command line and passes it to the elevated instance.
+ * Returns the exit code of the elevated process, or 1 on failure.
+ */
+static int relaunch_elevated(int argc, char* argv[]) {
+    /* Get path to our own executable */
+    wchar_t exe_path[MAX_PATH];
+    GetModuleFileNameW(nullptr, exe_path, MAX_PATH);
+
+    /* Reconstruct the command line arguments (skip argv[0]) */
+    std::wstring args;
+    for (int i = 1; i < argc; i++) {
+        if (i > 1) args += L" ";
+        std::wstring warg = to_wide(std::string(argv[i]));
+        /* Quote arguments with spaces */
+        if (warg.find(L' ') != std::wstring::npos) {
+            args += L"\"" + warg + L"\"";
+        } else {
+            args += warg;
+        }
+    }
+
+    log_info("Requesting administrator privileges...");
+
+    SHELLEXECUTEINFOW sei = {};
+    sei.cbSize = sizeof(sei);
+    sei.fMask = SEE_MASK_NOCLOSEPROCESS | SEE_MASK_NO_CONSOLE;
+    sei.lpVerb = L"runas";
+    sei.lpFile = exe_path;
+    sei.lpParameters = args.c_str();
+    sei.nShow = SW_SHOWNORMAL;
+
+    if (!ShellExecuteExW(&sei)) {
+        DWORD err = GetLastError();
+        if (err == ERROR_CANCELLED) {
+            log_error("UAC elevation was cancelled by user");
+        } else {
+            log_error("Failed to elevate: %s", format_win_error(err).c_str());
+        }
+        return 1;
+    }
+
+    /* Wait for the elevated process to finish */
+    if (sei.hProcess) {
+        WaitForSingleObject(sei.hProcess, INFINITE);
+        DWORD exit_code = 1;
+        GetExitCodeProcess(sei.hProcess, &exit_code);
+        CloseHandle(sei.hProcess);
+        return (int)exit_code;
+    }
+
+    return 0;
+}
+
+/*
+ * Check if a target executable's manifest requires elevation
+ * (requestedExecutionLevel = "requireAdministrator" or "highestAvailable").
+ * Also checks if the exe has the compatibility flag for admin.
+ */
+static bool target_requires_elevation(const std::string& exe_path) {
+    /* Try to create the process - if it fails with ERROR_ELEVATION_REQUIRED,
+     * we know it needs elevation. This is more reliable than parsing manifests. */
+    STARTUPINFOW si = {};
+    si.cb = sizeof(si);
+    PROCESS_INFORMATION pi = {};
+
+    std::wstring wcmdline = L"\"" + to_wide(exe_path) + L"\"";
+
+    BOOL result = CreateProcessW(
+        nullptr,
+        &wcmdline[0],
+        nullptr, nullptr, FALSE,
+        CREATE_SUSPENDED,
+        nullptr, nullptr,
+        &si, &pi
+    );
+
+    if (result) {
+        /* Process created successfully - it doesn't require elevation */
+        TerminateProcess(pi.hProcess, 0);
+        CloseHandle(pi.hProcess);
+        CloseHandle(pi.hThread);
+        return false;
+    }
+
+    return (GetLastError() == ERROR_ELEVATION_REQUIRED);
+}
+#endif
 
 int main(int argc, char* argv[]) {
 #ifdef _WIN32
@@ -180,6 +290,19 @@ int main(int argc, char* argv[]) {
     print_config_summary(config);
 
 #ifdef _WIN32
+    /*
+     * UAC auto-elevation: if the target process requires administrator
+     * privileges and we're not already elevated, re-launch proxyfire.exe
+     * with a UAC elevation prompt.
+     */
+    if (!is_elevated() && target_requires_elevation(opts.target_exe)) {
+        log_info("Target requires administrator privileges (UAC elevation needed)");
+        int result = relaunch_elevated(argc, argv);
+        logger_cleanup();
+        WSACleanup();
+        return result;
+    }
+
     /* Detect target architecture */
     PeArch target_arch = detect_pe_arch(opts.target_exe);
     log_info("Target: %s (%s)", opts.target_exe.c_str(), pe_arch_name(target_arch));
@@ -230,6 +353,23 @@ int main(int argc, char* argv[]) {
     /* Create target process in suspended state */
     PROCESS_INFORMATION pi;
     if (!create_suspended_process(opts.target_exe, opts.target_args, pipe_name, &pi)) {
+        DWORD err = GetLastError();
+
+        /*
+         * If process creation failed with ERROR_ELEVATION_REQUIRED and
+         * we're not elevated, attempt UAC elevation. This catches cases
+         * where target_requires_elevation() didn't detect the need
+         * (e.g., exe manifest loaded dynamically).
+         */
+        if (err == ERROR_ELEVATION_REQUIRED && !is_elevated()) {
+            log_info("Target requires elevation - requesting admin privileges...");
+            ipc_server_stop();
+            int result = relaunch_elevated(argc, argv);
+            logger_cleanup();
+            WSACleanup();
+            return result;
+        }
+
         log_error("Failed to create target process");
         ipc_server_stop();
         return 1;

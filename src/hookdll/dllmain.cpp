@@ -16,6 +16,7 @@
 #include "hook_installer.h"
 #include "dns_faker.h"
 #include "socket_context.h"
+#include "udp_relay.h"
 #include "ipc_client.h"
 
 #include <proxyfire/common.h>
@@ -26,7 +27,7 @@
 #include <MinHook.h>
 
 /* Global configuration - shared with all hook files */
-proxyfire::ProxyFireConfig g_config;
+ProxyFireConfig g_config;
 
 static HMODULE g_hModule = nullptr;
 static bool g_hooks_installed = false;
@@ -41,6 +42,7 @@ static DWORD WINAPI InitThread(LPVOID lpParam) {
     /* Initialize subsystems */
     proxyfire::dns_faker_init();
     proxyfire::socket_ctx_init();
+    proxyfire::udp_relay_init();
 
     /* Connect to launcher IPC */
     if (!proxyfire::ipc_client_init()) {
@@ -107,6 +109,7 @@ static void Cleanup() {
     proxyfire::ipc_client_log(PF_LOG_INFO, "Hook DLL unloading from PID %lu",
                               GetCurrentProcessId());
 
+    proxyfire::udp_relay_cleanup();
     proxyfire::socket_ctx_cleanup();
     proxyfire::dns_faker_cleanup();
     proxyfire::ipc_client_cleanup();
@@ -150,5 +153,5 @@ BOOL APIENTRY DllMain(HMODULE hModule, DWORD ul_reason_for_call, LPVOID lpReserv
 
 #else
 /* Non-Windows stub for compilation testing */
-proxyfire::ProxyFireConfig g_config;
+ProxyFireConfig g_config;
 #endif

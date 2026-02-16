@@ -14,8 +14,6 @@
 #include <ws2tcpip.h>
 #pragma comment(lib, "ws2_32.lib")
 
-/* We need the original connect - declared in hook_winsock.h */
-extern int (WSAAPI *Original_connect)(SOCKET s, const struct sockaddr* name, int namelen);
 #else
 #include <sys/socket.h>
 #include <netinet/in.h>
@@ -24,6 +22,11 @@ static int (*Original_connect)(int s, const struct sockaddr* name, int namelen) 
 #endif
 
 namespace proxyfire {
+
+#ifdef _WIN32
+/* We need the original connect - declared in hook_winsock.cpp */
+extern int (WSAAPI *Original_connect)(SOCKET s, const struct sockaddr* name, int namelen);
+#endif
 
 bool should_bypass(const ProxyFireConfig* config, uint32_t dest_ip, uint16_t dest_port) {
     (void)dest_port;
@@ -40,6 +43,12 @@ bool should_bypass(const ProxyFireConfig* config, uint32_t dest_ip, uint16_t des
 
     /* Always bypass link-local 169.254.0.0/16 */
     if (b[0] == 169 && b[1] == 254) return true;
+
+    /* Always bypass multicast 224.0.0.0/4 (224.x.x.x - 239.x.x.x) */
+    if ((b[0] & 0xF0) == 0xE0) return true;
+
+    /* Always bypass broadcast 255.255.255.255 */
+    if (dest_ip == 0xFFFFFFFF) return true;
 
     /* Bypass proxy server addresses themselves (prevent loops) */
     for (uint32_t i = 0; i < config->proxy_count; i++) {
@@ -64,7 +73,8 @@ int proxy_chain_connect(
     const ProxyFireConfig* config,
     uint32_t            dest_ip,
     uint16_t            dest_port,
-    const char*         dest_hostname)
+    const char*         dest_hostname,
+    const uint8_t*      dest_ipv6)
 {
     if (!config || config->proxy_count == 0) {
         /* No proxy configured - this shouldn't happen */
@@ -108,6 +118,7 @@ int proxy_chain_connect(
         const char* next_host = nullptr;
         uint32_t    next_ip = 0;
         uint16_t    next_port = 0;
+        const uint8_t* next_ipv6 = nullptr;
 
         if (i + 1 < config->proxy_count) {
             /* Connect to next proxy in chain */
@@ -115,11 +126,13 @@ int proxy_chain_connect(
             next_host = next_proxy->host;
             next_ip   = next_proxy->ip;
             next_port = next_proxy->port;
+            /* Intermediate hops are always IPv4 proxies, no IPv6 needed */
         } else {
             /* Last proxy - connect to actual destination */
             next_host = dest_hostname;
             next_ip   = dest_ip;
             next_port = dest_port;
+            next_ipv6 = dest_ipv6;
         }
 
         rc = proxy_handshake(
@@ -130,7 +143,8 @@ int proxy_chain_connect(
             next_port,
             proxy->username[0] ? proxy->username : nullptr,
             proxy->password[0] ? proxy->password : nullptr,
-            config->connect_timeout_ms
+            config->connect_timeout_ms,
+            next_ipv6
         );
 
         if (rc != 0) {
