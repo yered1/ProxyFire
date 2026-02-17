@@ -7,6 +7,17 @@
  * - Log message collection
  * - DNS table synchronization
  * - Child process notifications
+ *
+ * The pipe uses MESSAGE mode so that each WriteFile from the client
+ * creates a discrete message and each ReadFile returns exactly one
+ * complete message.  This prevents coalescing of back-to-back writes
+ * (e.g. registration + config request) into a single read that would
+ * silently drop subsequent messages.
+ *
+ * The pipe is created with FILE_FLAG_OVERLAPPED so that blocking I/O
+ * can be cancelled via the stop event.  ALL ReadFile/WriteFile calls
+ * use a proper OVERLAPPED structure (passing NULL on an overlapped
+ * handle is undefined behaviour per MSDN).
  */
 
 #include "ipc_server.h"
@@ -34,6 +45,72 @@ static volatile bool g_running = false;
 static HANDLE g_stop_event = nullptr;
 static std::wstring g_pipe_name;
 
+/* SDDL string for pipe ACL: owner + SYSTEM only */
+static const wchar_t* PIPE_SDDL = L"D:P(A;;GA;;;OW)(A;;GA;;;SY)";
+
+/*
+ * Helper: create the named pipe with message mode, overlapped, and ACL.
+ * Used both for initial creation and recreation after client disconnect.
+ */
+static HANDLE create_message_pipe() {
+    PSECURITY_DESCRIPTOR psd = nullptr;
+    SECURITY_ATTRIBUTES sa = {};
+    bool have_acl = false;
+
+    if (ConvertStringSecurityDescriptorToSecurityDescriptorW(
+            PIPE_SDDL, SDDL_REVISION_1, &psd, nullptr)) {
+        sa.nLength = sizeof(SECURITY_ATTRIBUTES);
+        sa.lpSecurityDescriptor = psd;
+        sa.bInheritHandle = FALSE;
+        have_acl = true;
+    } else {
+        log_warn("Failed to create pipe ACL (error %lu), using default security",
+                 GetLastError());
+    }
+
+    HANDLE h = CreateNamedPipeW(
+        g_pipe_name.c_str(),
+        PIPE_ACCESS_DUPLEX | FILE_FLAG_OVERLAPPED,
+        PIPE_TYPE_MESSAGE | PIPE_READMODE_MESSAGE | PIPE_WAIT,
+        PIPE_UNLIMITED_INSTANCES,
+        (DWORD)IPC_MAX_MSG_SIZE,
+        (DWORD)IPC_MAX_MSG_SIZE,
+        0,
+        have_acl ? &sa : nullptr
+    );
+
+    if (psd) LocalFree(psd);
+    return h;
+}
+
+/*
+ * Helper: overlapped WriteFile on the pipe.
+ * Handles ERROR_IO_PENDING and waits for completion with a timeout.
+ */
+static bool pipe_write_overlapped(const void* data, DWORD len) {
+    if (g_pipe == INVALID_HANDLE_VALUE) return false;
+
+    OVERLAPPED ov = {};
+    ov.hEvent = CreateEventW(nullptr, TRUE, FALSE, nullptr);
+    if (!ov.hEvent) return false;
+
+    DWORD written = 0;
+    BOOL ok = WriteFile(g_pipe, data, len, &written, &ov);
+
+    if (!ok) {
+        DWORD err = GetLastError();
+        if (err == ERROR_IO_PENDING) {
+            /* Wait up to 5 seconds for the write to complete */
+            if (WaitForSingleObject(ov.hEvent, 5000) == WAIT_OBJECT_0) {
+                ok = GetOverlappedResult(g_pipe, &ov, &written, FALSE);
+            }
+        }
+    }
+
+    CloseHandle(ov.hEvent);
+    return ok && written == len;
+}
+
 std::wstring ipc_server_start(const ProxyFireConfig* config, LogCallback log_cb) {
     g_config = config;
     g_log_callback = log_cb;
@@ -49,45 +126,7 @@ std::wstring ipc_server_start(const ProxyFireConfig* config, LogCallback log_cb)
     /* Create stop event */
     g_stop_event = CreateEventW(nullptr, TRUE, FALSE, nullptr);
 
-    /*
-     * Create a security descriptor that restricts pipe access to the current
-     * user and SYSTEM only. This prevents other users/processes from connecting
-     * to steal proxy credentials or inject false configurations.
-     */
-    SECURITY_ATTRIBUTES sa = {};
-    SECURITY_DESCRIPTOR sd = {};
-    PSECURITY_DESCRIPTOR psd = nullptr;
-    bool have_acl = false;
-
-    /* Build a DACL string: Allow full access to Owner and SYSTEM only */
-    /* D:P = DACL with PROTECTED flag
-     * (A;;GA;;;OW) = Allow Generic All to Owner
-     * (A;;GA;;;SY) = Allow Generic All to SYSTEM */
-    if (ConvertStringSecurityDescriptorToSecurityDescriptorW(
-            L"D:P(A;;GA;;;OW)(A;;GA;;;SY)",
-            SDDL_REVISION_1, &psd, nullptr)) {
-        sa.nLength = sizeof(SECURITY_ATTRIBUTES);
-        sa.lpSecurityDescriptor = psd;
-        sa.bInheritHandle = FALSE;
-        have_acl = true;
-    } else {
-        log_warn("Failed to create pipe ACL (error %lu), pipe will use default security",
-                 GetLastError());
-    }
-
-    /* Create the named pipe */
-    g_pipe = CreateNamedPipeW(
-        g_pipe_name.c_str(),
-        PIPE_ACCESS_DUPLEX | FILE_FLAG_OVERLAPPED,
-        PIPE_TYPE_BYTE | PIPE_READMODE_BYTE | PIPE_WAIT,
-        PIPE_UNLIMITED_INSTANCES,
-        (DWORD)IPC_MAX_MSG_SIZE,
-        (DWORD)IPC_MAX_MSG_SIZE,
-        0,
-        have_acl ? &sa : nullptr
-    );
-
-    if (psd) LocalFree(psd);
+    g_pipe = create_message_pipe();
 
     if (g_pipe == INVALID_HANDLE_VALUE) {
         log_error("CreateNamedPipeW failed: %s",
@@ -118,12 +157,12 @@ static void handle_message(const uint8_t* data, size_t len) {
         }
 
         case IPC_CONFIG_REQUEST: {
-            /* Send config back */
+            /* Send config back using overlapped WriteFile */
             if (g_config && g_pipe != INVALID_HANDLE_VALUE) {
                 auto response = ipc_build_config_response(*g_config);
-                DWORD written = 0;
-                WriteFile(g_pipe, response.data(), (DWORD)response.size(),
-                         &written, nullptr);
+                if (!pipe_write_overlapped(response.data(), (DWORD)response.size())) {
+                    log_warn("Failed to send config response to hook DLL");
+                }
             }
             break;
         }
@@ -185,72 +224,86 @@ void ipc_server_run() {
     uint8_t buffer[IPC_MAX_MSG_SIZE];
 
     while (g_running) {
-        /* Wait for a client to connect */
-        OVERLAPPED ov = {};
-        ov.hEvent = CreateEventW(nullptr, TRUE, FALSE, nullptr);
+        /* Wait for a client to connect (overlapped for cancellation) */
+        OVERLAPPED ov_conn = {};
+        ov_conn.hEvent = CreateEventW(nullptr, TRUE, FALSE, nullptr);
 
-        BOOL connected = ConnectNamedPipe(g_pipe, &ov);
+        BOOL connected = ConnectNamedPipe(g_pipe, &ov_conn);
         if (!connected) {
             DWORD err = GetLastError();
             if (err == ERROR_IO_PENDING) {
                 /* Wait for connection or stop event */
-                HANDLE events[] = { ov.hEvent, g_stop_event };
+                HANDLE events[] = { ov_conn.hEvent, g_stop_event };
                 DWORD wait = WaitForMultipleObjects(2, events, FALSE, INFINITE);
 
                 if (wait != WAIT_OBJECT_0) {
                     /* Stop requested */
                     CancelIo(g_pipe);
-                    CloseHandle(ov.hEvent);
+                    CloseHandle(ov_conn.hEvent);
                     break;
                 }
             } else if (err != ERROR_PIPE_CONNECTED) {
-                CloseHandle(ov.hEvent);
+                CloseHandle(ov_conn.hEvent);
                 Sleep(100);
                 continue;
             }
         }
 
-        CloseHandle(ov.hEvent);
+        CloseHandle(ov_conn.hEvent);
 
-        /* Client connected - read messages */
-        while (g_running) {
+        /*
+         * Client connected - read messages using overlapped I/O.
+         *
+         * Each ReadFile returns exactly one complete IPC message because
+         * the pipe is in MESSAGE mode.  The OVERLAPPED structure allows
+         * us to wait on both the read completion and the stop event.
+         */
+        HANDLE hReadEvent = CreateEventW(nullptr, TRUE, FALSE, nullptr);
+
+        while (g_running && hReadEvent) {
+            OVERLAPPED ov_read = {};
+            ov_read.hEvent = hReadEvent;
+            ResetEvent(hReadEvent);
+
             DWORD bytes_read = 0;
-            BOOL ok = ReadFile(g_pipe, buffer, sizeof(buffer), &bytes_read, nullptr);
+            BOOL ok = ReadFile(g_pipe, buffer, sizeof(buffer), &bytes_read, &ov_read);
 
-            if (!ok || bytes_read == 0) {
-                break;  /* Client disconnected */
+            if (!ok) {
+                DWORD err = GetLastError();
+                if (err == ERROR_IO_PENDING) {
+                    /* Wait for data or stop event */
+                    HANDLE events[] = { hReadEvent, g_stop_event };
+                    DWORD wait = WaitForMultipleObjects(2, events, FALSE, INFINITE);
+
+                    if (wait != WAIT_OBJECT_0) {
+                        CancelIo(g_pipe);
+                        break;
+                    }
+
+                    ok = GetOverlappedResult(g_pipe, &ov_read, &bytes_read, FALSE);
+                    if (!ok || bytes_read == 0) break;
+                } else {
+                    break;  /* Client disconnected or error */
+                }
             }
+
+            if (bytes_read == 0) break;
 
             handle_message(buffer, bytes_read);
         }
 
+        if (hReadEvent) CloseHandle(hReadEvent);
+
         /* Disconnect and prepare for next client */
         DisconnectNamedPipe(g_pipe);
 
-        /* Recreate pipe for next client with same ACL */
+        /* Recreate pipe for next client */
         CloseHandle(g_pipe);
-        PSECURITY_DESCRIPTOR psd2 = nullptr;
-        SECURITY_ATTRIBUTES sa2 = {};
-        bool have_acl2 = false;
-        if (ConvertStringSecurityDescriptorToSecurityDescriptorW(
-                L"D:P(A;;GA;;;OW)(A;;GA;;;SY)",
-                SDDL_REVISION_1, &psd2, nullptr)) {
-            sa2.nLength = sizeof(SECURITY_ATTRIBUTES);
-            sa2.lpSecurityDescriptor = psd2;
-            sa2.bInheritHandle = FALSE;
-            have_acl2 = true;
+        g_pipe = create_message_pipe();
+        if (g_pipe == INVALID_HANDLE_VALUE) {
+            log_error("Failed to recreate pipe for next client");
+            break;
         }
-        g_pipe = CreateNamedPipeW(
-            g_pipe_name.c_str(),
-            PIPE_ACCESS_DUPLEX | FILE_FLAG_OVERLAPPED,
-            PIPE_TYPE_BYTE | PIPE_READMODE_BYTE | PIPE_WAIT,
-            PIPE_UNLIMITED_INSTANCES,
-            (DWORD)IPC_MAX_MSG_SIZE,
-            (DWORD)IPC_MAX_MSG_SIZE,
-            0,
-            have_acl2 ? &sa2 : nullptr
-        );
-        if (psd2) LocalFree(psd2);
     }
 }
 

@@ -61,8 +61,10 @@ bool ipc_client_init() {
         return false;
     }
 
-    /* Set pipe to message mode */
-    DWORD mode = PIPE_READMODE_BYTE;
+    /* Set pipe to message read mode to match the server's PIPE_TYPE_MESSAGE.
+     * In message mode each ReadFile returns exactly one complete message
+     * (or ERROR_MORE_DATA if the buffer is smaller than the message). */
+    DWORD mode = PIPE_READMODE_MESSAGE;
     SetNamedPipeHandleState(g_pipe, &mode, NULL, NULL);
 
     return true;
@@ -90,7 +92,21 @@ static bool pipe_recv(void* buf, uint32_t len) {
     while (remaining > 0) {
         DWORD read_bytes = 0;
         BOOL ok = ReadFile(g_pipe, ptr, remaining, &read_bytes, NULL);
-        if (!ok || read_bytes == 0) return false;
+        if (!ok) {
+            /*
+             * In PIPE_READMODE_MESSAGE mode, if our buffer is smaller
+             * than the full message, ReadFile returns FALSE with
+             * ERROR_MORE_DATA.  The bytes that fit are still placed in
+             * the buffer and the remaining bytes can be read with
+             * subsequent ReadFile calls.  This is the expected path
+             * when we read the IpcHeader first and then read the
+             * payload separately.
+             */
+            if (GetLastError() != ERROR_MORE_DATA || read_bytes == 0)
+                return false;
+        } else if (read_bytes == 0) {
+            return false;
+        }
         ptr += read_bytes;
         remaining -= read_bytes;
     }
