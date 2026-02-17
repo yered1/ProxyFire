@@ -45,8 +45,52 @@ BOOL (WSAAPI *Original_WSAConnectByNameA)(SOCKET, LPCSTR, LPCSTR,
      LPDWORD, LPSOCKADDR, LPDWORD, LPSOCKADDR,
      const struct timeval*, LPWSAOVERLAPPED) = nullptr;
 
-/* Real ConnectEx function pointer (discovered via WSAIoctl) */
+/* Real ConnectEx function pointer.
+ * Initially set by pre_resolve_connectex() before hooks are installed,
+ * then updated to the MinHook trampoline if direct inline hooking succeeds. */
 static LPFN_CONNECTEX Real_ConnectEx = nullptr;
+
+/*
+ * Pre-resolve ConnectEx by calling the real WSAIoctl BEFORE any hooks
+ * are installed.  This ensures Real_ConnectEx is set without going
+ * through the potentially-broken WSAIoctl trampoline.
+ */
+void pre_resolve_connectex() {
+    /* Ensure Winsock is initialised (target app hasn't started yet). */
+    WSADATA wsaData;
+    if (WSAStartup(MAKEWORD(2, 2), &wsaData) != 0) return;
+
+    SOCKET tmp = socket(AF_INET, SOCK_STREAM, IPPROTO_TCP);
+    if (tmp != INVALID_SOCKET) {
+        GUID guid = WSAID_CONNECTEX;
+        DWORD bytes = 0;
+        LPFN_CONNECTEX fn = nullptr;
+
+        int rc = WSAIoctl(tmp, SIO_GET_EXTENSION_FUNCTION_POINTER,
+                          &guid, sizeof(guid),
+                          &fn, sizeof(fn),
+                          &bytes, NULL, NULL);
+
+        if (rc == 0 && fn) {
+            Real_ConnectEx = fn;
+            ipc_client_log(PF_LOG_DEBUG, "Pre-resolved ConnectEx at %p",
+                          (void*)fn);
+        }
+
+        closesocket(tmp);
+    }
+    /* Intentionally leave Winsock initialised (ref-count stays +1).
+     * The target app will call WSAStartup itself; the extra reference is
+     * harmless and avoids tearing down state that later hooks depend on. */
+}
+
+LPFN_CONNECTEX get_real_connectex() {
+    return Real_ConnectEx;
+}
+
+void set_real_connectex(LPFN_CONNECTEX fn) {
+    Real_ConnectEx = fn;
+}
 
 /* Forward declaration for is_numeric_address (used by WSAConnectByName hooks) */
 static bool is_numeric_address(const char* str) {

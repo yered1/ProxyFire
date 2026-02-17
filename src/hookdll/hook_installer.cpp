@@ -520,6 +520,43 @@ bool install_all_hooks() {
         }
     }
 
+    /*
+     * Hook ConnectEx directly if we pre-resolved its address.
+     *
+     * ConnectEx is a Winsock extension obtained via WSAIoctl rather than
+     * a regular DLL export, so it cannot appear in the table above.
+     * A direct inline hook is the most robust interception method:
+     * it catches ALL callers regardless of how they obtained the pointer
+     * (WSAIoctl, cached value, etc.).
+     *
+     * If this inline hook succeeds, Real_ConnectEx is updated to the
+     * trampoline so Hooked_ConnectEx can call through to the original.
+     * If it fails, the WSAIoctl hook still intercepts pointer requests
+     * and returns Hooked_ConnectEx (without calling Original_WSAIoctl,
+     * since Real_ConnectEx was already pre-resolved).
+     */
+    LPFN_CONNECTEX real_connectex = get_real_connectex();
+    if (real_connectex) {
+        LPFN_CONNECTEX trampoline = nullptr;
+        MH_STATUS cx_status = MH_CreateHook(
+            (LPVOID)real_connectex,
+            (LPVOID)Hooked_ConnectEx,
+            (LPVOID*)&trampoline);
+
+        if (cx_status == MH_OK) {
+            /* Point Real_ConnectEx at the trampoline so pass-through calls
+             * from Hooked_ConnectEx reach the original function body. */
+            set_real_connectex(trampoline);
+            ipc_client_log(PF_LOG_DEBUG,
+                "Hooked ConnectEx directly at %p", (void*)real_connectex);
+        } else {
+            ipc_client_log(PF_LOG_DEBUG,
+                "Could not inline-hook ConnectEx (%s), "
+                "WSAIoctl interception will be used as fallback",
+                MH_StatusToString(cx_status));
+        }
+    }
+
     return all_ok;
 }
 
