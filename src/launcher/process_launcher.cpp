@@ -80,6 +80,7 @@ bool create_suspended_process(
     const std::string& exe_path,
     const std::vector<std::string>& args,
     const std::wstring& pipe_name,
+    const std::wstring& ready_event_name,
     PROCESS_INFORMATION* pi)
 {
     if (!pi) return false;
@@ -122,6 +123,13 @@ bool create_suspended_process(
     std::wstring pipe_var = std::wstring(PROXYFIRE_ENV_PIPE) + L"=" + pipe_name;
     env_block.append(pipe_var);
     env_block.push_back(L'\0');
+
+    /* Add ready event name variable */
+    if (!ready_event_name.empty()) {
+        std::wstring event_var = std::wstring(PROXYFIRE_ENV_READY_EVENT) + L"=" + ready_event_name;
+        env_block.append(event_var);
+        env_block.push_back(L'\0');
+    }
 
     /* Double null terminator */
     env_block.push_back(L'\0');

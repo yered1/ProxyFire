@@ -34,6 +34,9 @@
 /* Environment variable for pipe name */
 #define PROXYFIRE_ENV_PIPE L"PROXYFIRE_PIPE"
 
+/* Environment variable for ready event name (synchronization) */
+#define PROXYFIRE_ENV_READY_EVENT L"PROXYFIRE_READY_EVENT"
+
 /* Environment variable for config (fallback) */
 #define PROXYFIRE_ENV_CONFIG L"PROXYFIRE_CONFIG"
 
