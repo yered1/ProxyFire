@@ -73,14 +73,21 @@ static bool is_numeric_address_w(const wchar_t* str) {
 /*
  * Build a synthetic addrinfo result with a fake IP.
  * Uses HeapAlloc so that freeaddrinfo (which uses HeapFree) can free it.
+ * The sockaddr is allocated separately because some Windows versions'
+ * freeaddrinfo implementations free ai_addr with a separate HeapFree call.
  */
 static struct addrinfo* build_fake_addrinfo(uint32_t fake_ip_net, const char* service) {
     HANDLE heap = GetProcessHeap();
-    size_t total = sizeof(struct addrinfo) + sizeof(struct sockaddr_in);
-    struct addrinfo* ai = (struct addrinfo*)HeapAlloc(heap, HEAP_ZERO_MEMORY, total);
+    struct addrinfo* ai = (struct addrinfo*)HeapAlloc(heap, HEAP_ZERO_MEMORY,
+                                                       sizeof(struct addrinfo));
     if (!ai) return nullptr;
 
-    struct sockaddr_in* sa = (struct sockaddr_in*)(ai + 1);
+    struct sockaddr_in* sa = (struct sockaddr_in*)HeapAlloc(heap, HEAP_ZERO_MEMORY,
+                                                             sizeof(struct sockaddr_in));
+    if (!sa) {
+        HeapFree(heap, 0, ai);
+        return nullptr;
+    }
 
     sa->sin_family = AF_INET;
     sa->sin_addr.s_addr = fake_ip_net;
@@ -102,14 +109,20 @@ static struct addrinfo* build_fake_addrinfo(uint32_t fake_ip_net, const char* se
 /*
  * Build a synthetic ADDRINFOW result with a fake IP.
  * Uses HeapAlloc so that FreeAddrInfoW (which uses HeapFree) can free it.
+ * The sockaddr is allocated separately because some Windows versions'
+ * FreeAddrInfoW implementations free ai_addr with a separate HeapFree call.
  */
 static ADDRINFOW* build_fake_addrinfow(uint32_t fake_ip_net, const wchar_t* service) {
     HANDLE heap = GetProcessHeap();
-    size_t total = sizeof(ADDRINFOW) + sizeof(struct sockaddr_in);
-    ADDRINFOW* ai = (ADDRINFOW*)HeapAlloc(heap, HEAP_ZERO_MEMORY, total);
+    ADDRINFOW* ai = (ADDRINFOW*)HeapAlloc(heap, HEAP_ZERO_MEMORY, sizeof(ADDRINFOW));
     if (!ai) return nullptr;
 
-    struct sockaddr_in* sa = (struct sockaddr_in*)(ai + 1);
+    struct sockaddr_in* sa = (struct sockaddr_in*)HeapAlloc(heap, HEAP_ZERO_MEMORY,
+                                                             sizeof(struct sockaddr_in));
+    if (!sa) {
+        HeapFree(heap, 0, ai);
+        return nullptr;
+    }
 
     sa->sin_family = AF_INET;
     sa->sin_addr.s_addr = fake_ip_net;
@@ -134,11 +147,15 @@ static ADDRINFOW* build_fake_addrinfow(uint32_t fake_ip_net, const wchar_t* serv
  */
 static ADDRINFOEXW* build_fake_addrinfoexw(uint32_t fake_ip_net, const wchar_t* service) {
     HANDLE heap = GetProcessHeap();
-    size_t total = sizeof(ADDRINFOEXW) + sizeof(struct sockaddr_in);
-    ADDRINFOEXW* ai = (ADDRINFOEXW*)HeapAlloc(heap, HEAP_ZERO_MEMORY, total);
+    ADDRINFOEXW* ai = (ADDRINFOEXW*)HeapAlloc(heap, HEAP_ZERO_MEMORY, sizeof(ADDRINFOEXW));
     if (!ai) return nullptr;
 
-    struct sockaddr_in* sa = (struct sockaddr_in*)((char*)ai + sizeof(ADDRINFOEXW));
+    struct sockaddr_in* sa = (struct sockaddr_in*)HeapAlloc(heap, HEAP_ZERO_MEMORY,
+                                                             sizeof(struct sockaddr_in));
+    if (!sa) {
+        HeapFree(heap, 0, ai);
+        return nullptr;
+    }
 
     sa->sin_family = AF_INET;
     sa->sin_addr.s_addr = fake_ip_net;

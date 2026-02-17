@@ -23,10 +23,13 @@
 
 // Relay function for x64.
 // Includes indirect jump via RIP-relative addressing.
+// Encoding: FF 25 00 00 00 00 [8-byte absolute address]
+// = JMP [RIP+0], followed by the 8-byte target address.
 typedef struct _JMP_RELAY
 {
-    UINT8  opcode;      // FF 25 xx xx xx xx : JMP [RIP+xxxx]
-    UINT32 operand;
+    UINT8  opcode;      // FF
+    UINT8  modrm;       // 25
+    UINT32 disp32;      // 00 00 00 00 (RIP-relative displacement = 0)
     UINT64 address;     // Absolute destination address
 } JMP_RELAY, *PJMP_RELAY;
 

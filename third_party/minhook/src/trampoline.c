@@ -77,7 +77,26 @@ BOOL CreateTrampolineFunction(PTRAMPOLINE ct)
 
         copySize = HDE_DISASM((LPVOID)pOldInst, &hs);
         if (hs.flags & F_ERROR)
-            return FALSE;
+        {
+            // Check for ENDBR64 (F3 0F 1E FA) / ENDBR32 (F3 0F 1E FB).
+            // These Intel CET instructions are effectively NOPs on non-CET
+            // hardware and are safe to copy verbatim into the trampoline.
+            // Older HDE versions may flag them as errors because the opcode
+            // tables predate the CET extension.
+            LPBYTE pBytes = (LPBYTE)pOldInst;
+            if (pBytes[0] == 0xF3 && pBytes[1] == 0x0F &&
+                pBytes[2] == 0x1E && (pBytes[3] == 0xFA || pBytes[3] == 0xFB))
+            {
+                copySize = 4;
+                memset(&hs, 0, sizeof(hs));
+                hs.len = 4;
+                // Fall through to copy the ENDBR instruction as-is.
+            }
+            else
+            {
+                return FALSE;
+            }
+        }
 
         pCopySrc = (LPVOID)pOldInst;
 
@@ -85,12 +104,10 @@ BOOL CreateTrampolineFunction(PTRAMPOLINE ct)
         {
             // The trampoline function is long enough.
             // Complete the function with the jump to the target function.
-#if defined(_M_X64) || defined(__x86_64__)
+            // The instruction at pOldInst is beyond the overwritten area,
+            // so do NOT copy it to the trampoline — jump directly to it.
             jmpDest = pOldInst;
-#else
-            jmpDest = pOldInst;
-#endif
-            finished = TRUE;
+            break;
         }
 #if defined(_M_X64) || defined(__x86_64__)
         else if ((hs.modrm & 0xC7) == 0x05)
@@ -317,10 +334,12 @@ BOOL CreateTrampolineFunction(PTRAMPOLINE ct)
         newPos += sizeof(JMP_REL);
 
         // Create a relay function for the detour.
+        // Encoding: FF 25 00 00 00 00 [8-byte address] = JMP [RIP+0]
         {
             PJMP_RELAY pRelay = (PJMP_RELAY)((LPBYTE)ct->pTrampoline + newPos);
             pRelay->opcode  = 0xFF;
-            pRelay->operand = 0x00000025;   // 25 00 00 00 00 = RIP+0
+            pRelay->modrm   = 0x25;
+            pRelay->disp32  = 0x00000000;
             pRelay->address = (UINT64)(ULONG_PTR)ct->pDetour;
             ct->pRelay = pRelay;
         }
