@@ -14,6 +14,7 @@
  */
 
 #include "hook_installer.h"
+#include "hook_winsock.h"
 #include "dns_faker.h"
 #include "socket_context.h"
 #include "udp_relay.h"
@@ -94,6 +95,21 @@ setup_hooks:
         signal_ready_event();  /* Signal even on failure so launcher doesn't hang */
         return 1;
     }
+
+    /*
+     * Pre-resolve ConnectEx BEFORE installing hooks.
+     *
+     * Go programs (and other IOCP-based apps) obtain ConnectEx via
+     * WSAIoctl(SIO_GET_EXTENSION_FUNCTION_POINTER).  Our WSAIoctl hook
+     * normally calls Original_WSAIoctl (the MinHook trampoline) to get
+     * the real ConnectEx, but certain ws2_32.dll builds produce
+     * prologues whose RIP-relative instructions are mis-relocated by
+     * the trampoline, causing an access-violation crash.
+     *
+     * By resolving ConnectEx here (before any hooks are installed) we
+     * call the real WSAIoctl directly and avoid the trampoline entirely.
+     */
+    proxyfire::pre_resolve_connectex();
 
     /* Install all hooks */
     if (!proxyfire::install_all_hooks()) {

@@ -38,6 +38,20 @@ BOOL WSAAPI Hooked_WSAConnectByNameA(SOCKET s, LPCSTR nodename, LPCSTR servicena
                                       LPDWORD RemoteAddressLength, LPSOCKADDR RemoteAddress,
                                       const struct timeval* timeout, LPWSAOVERLAPPED Reserved);
 
+/*
+ * Pre-resolve the ConnectEx extension function pointer BEFORE hooks are
+ * installed.  This avoids the need to call Original_WSAIoctl (trampoline)
+ * at runtime, which can crash if the trampoline mis-relocates an
+ * instruction in WSAIoctl's prologue.
+ *
+ * Must be called after MH_Initialize() but before install_all_hooks().
+ */
+void pre_resolve_connectex();
+
+/* Get/set the real ConnectEx pointer (used by hook_installer for direct hook) */
+LPFN_CONNECTEX get_real_connectex();
+void set_real_connectex(LPFN_CONNECTEX fn);
+
 /* Original function pointers - must be accessible from proxy_chain.cpp */
 extern int (WSAAPI *Original_connect)(SOCKET, const struct sockaddr*, int);
 
