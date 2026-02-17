@@ -37,10 +37,11 @@ const char* pe_arch_name(PeArch arch);
 /**
  * Create a process in suspended state with a custom environment.
  *
- * @param exe_path      Path to the executable
- * @param args          Arguments for the executable
- * @param pipe_name     Named pipe name (set as env var for hook DLL)
- * @param pi            [out] Process information
+ * @param exe_path          Path to the executable
+ * @param args              Arguments for the executable
+ * @param pipe_name         Named pipe name (set as env var for hook DLL)
+ * @param ready_event_name  Named event for hook-ready synchronization
+ * @param pi                [out] Process information
  *
  * @return true on success
  */
@@ -48,6 +49,7 @@ bool create_suspended_process(
     const std::string& exe_path,
     const std::vector<std::string>& args,
     const std::wstring& pipe_name,
+    const std::wstring& ready_event_name,
     PROCESS_INFORMATION* pi
 );
 

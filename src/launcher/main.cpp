@@ -350,9 +350,29 @@ int main(int argc, char* argv[]) {
     std::thread ipc_thread(ipc_server_run);
     ipc_thread.detach();
 
+    /*
+     * Create a named event for hook-ready synchronization.
+     * The hook DLL signals this event after all hooks are installed,
+     * and we wait for it before resuming the target's main thread.
+     * This prevents a race where the target makes network calls
+     * before hooks are in place, causing an illegal-instruction crash.
+     */
+    wchar_t ready_event_name[256];
+    swprintf(ready_event_name, 256, L"ProxyFire_Ready_%lu_%lu",
+             GetCurrentProcessId(), GetTickCount());
+
+    HANDLE hReadyEvent = CreateEventW(nullptr, TRUE, FALSE, ready_event_name);
+    if (!hReadyEvent) {
+        log_error("Failed to create ready event: %s",
+                  format_win_error(GetLastError()).c_str());
+        ipc_server_stop();
+        return 1;
+    }
+
     /* Create target process in suspended state */
     PROCESS_INFORMATION pi;
-    if (!create_suspended_process(opts.target_exe, opts.target_args, pipe_name, &pi)) {
+    if (!create_suspended_process(opts.target_exe, opts.target_args, pipe_name,
+                                   std::wstring(ready_event_name), &pi)) {
         DWORD err = GetLastError();
 
         /*
@@ -363,6 +383,7 @@ int main(int argc, char* argv[]) {
          */
         if (err == ERROR_ELEVATION_REQUIRED && !is_elevated()) {
             log_info("Target requires elevation - requesting admin privileges...");
+            CloseHandle(hReadyEvent);
             ipc_server_stop();
             int result = relaunch_elevated(argc, argv);
             logger_cleanup();
@@ -371,6 +392,7 @@ int main(int argc, char* argv[]) {
         }
 
         log_error("Failed to create target process");
+        CloseHandle(hReadyEvent);
         ipc_server_stop();
         return 1;
     }
@@ -381,11 +403,27 @@ int main(int argc, char* argv[]) {
         log_error("DLL injection failed!");
         TerminateProcess(pi.hProcess, 1);
         close_process(&pi);
+        CloseHandle(hReadyEvent);
         ipc_server_stop();
         return 1;
     }
 
     log_info("Hook DLL injected successfully");
+
+    /*
+     * Wait for the hook DLL to signal that all hooks are installed.
+     * The DLL's InitThread runs after DllMain returns (loader lock is
+     * released) and signals hReadyEvent once MH_EnableHook completes.
+     * 30-second timeout to avoid hanging if the DLL fails.
+     */
+    log_info("Waiting for hook DLL to initialize...");
+    DWORD wait_result = WaitForSingleObject(hReadyEvent, 30000);
+    CloseHandle(hReadyEvent);
+
+    if (wait_result != WAIT_OBJECT_0) {
+        log_warn("Hook DLL did not signal ready in time (wait=%lu), resuming anyway",
+                 wait_result);
+    }
 
     /* Resume the target process */
     log_info("Resuming target process...");
