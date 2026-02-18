@@ -319,9 +319,32 @@ BOOL CreateTrampolineFunction(PTRAMPOLINE ct)
             INT64 jumpDist = (INT64)(jmpDest - (pTrampJump + sizeof(JMP_REL)));
             if (jumpDist < INT32_MIN || jumpDist > INT32_MAX)
             {
-                // Not enough space for a relay jump? Fail.
-                if (newPos + sizeof(JMP_REL) + sizeof(JMP_RELAY) > MEMORY_SLOT_SIZE)
+                // Need an indirect JMP (14 bytes) instead of rel32 (5 bytes).
+                if (newPos + sizeof(JMP_RELAY) + sizeof(JMP_RELAY) > MEMORY_SLOT_SIZE)
                     return FALSE;
+
+                // Write JMP [RIP+0] with absolute 8-byte target to jump
+                // back to the remainder of the original function.
+                {
+                    PJMP_RELAY pBack = (PJMP_RELAY)pTrampJump;
+                    pBack->opcode  = 0xFF;
+                    pBack->modrm   = 0x25;
+                    pBack->disp32  = 0x00000000;
+                    pBack->address = (UINT64)jmpDest;
+                }
+                newPos += sizeof(JMP_RELAY);
+
+                // Create a relay function for the detour.
+                {
+                    PJMP_RELAY pRelay = (PJMP_RELAY)((LPBYTE)ct->pTrampoline + newPos);
+                    pRelay->opcode  = 0xFF;
+                    pRelay->modrm   = 0x25;
+                    pRelay->disp32  = 0x00000000;
+                    pRelay->address = (UINT64)(ULONG_PTR)ct->pDetour;
+                    ct->pRelay = pRelay;
+                }
+
+                return TRUE;
             }
         }
 

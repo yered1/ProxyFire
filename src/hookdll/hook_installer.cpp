@@ -455,9 +455,30 @@ static HookEntry g_hooks[] = {
 
 static const int g_hook_count = sizeof(g_hooks) / sizeof(g_hooks[0]);
 
+/*
+ * Helper: resolve the GetProcAddress target for a hook entry so we can
+ * call MH_RemoveHook with the exact address MinHook used.
+ */
+static LPVOID get_hook_target(const HookEntry& entry) {
+    HMODULE hMod = GetModuleHandleW(entry.module);
+    if (!hMod) return nullptr;
+    return (LPVOID)GetProcAddress(hMod, entry.funcName);
+}
+
 bool install_all_hooks() {
     bool all_ok = true;
 
+    /*
+     * Track per-hook inline status so we can do module-wide fallback.
+     * MH_OK            = inline hook created successfully
+     * MH_ERROR_*       = inline hook failed
+     * MH_UNKNOWN       = not attempted (module/function not found)
+     */
+    MH_STATUS inline_status[sizeof(g_hooks) / sizeof(g_hooks[0])];
+    for (int i = 0; i < g_hook_count; i++)
+        inline_status[i] = MH_UNKNOWN;
+
+    /* ---- Phase 1: Try inline hooking for every function ----------- */
     for (int i = 0; i < g_hook_count; i++) {
         MH_STATUS status = MH_CreateHookApi(
             g_hooks[i].module,
@@ -480,43 +501,129 @@ bool install_all_hooks() {
             }
         }
 
-        /*
-         * Fallback 2: If inline hooking completely failed, try IAT hooking.
-         * This patches function pointers in the import tables of all loaded
-         * modules, which works regardless of the function's prologue.
-         */
-        if (status == MH_ERROR_UNSUPPORTED_FUNCTION || status == MH_ERROR_MEMORY_ALLOC) {
-            log_function_bytes(g_hooks[i].module, g_hooks[i].funcName,
-                               g_hooks[i].description);
+        inline_status[i] = status;
 
-            ipc_client_log(PF_LOG_INFO,
-                "Inline hook failed for %s, falling back to IAT hooking",
-                g_hooks[i].description);
+        if (status == MH_OK) {
+            ipc_client_log(PF_LOG_DEBUG, "Inline-hooked %s", g_hooks[i].description);
+        } else if (status == MH_ERROR_MODULE_NOT_FOUND ||
+                   status == MH_ERROR_FUNCTION_NOT_FOUND) {
+            ipc_client_log(PF_LOG_DEBUG, "Skipped %s (not found)", g_hooks[i].description);
+        } else {
+            ipc_client_log(PF_LOG_DEBUG,
+                "Inline hook failed for %s: %s",
+                g_hooks[i].description, MH_StatusToString(status));
+        }
+    }
 
-            if (iat_hook_function(g_hooks[i].module, g_hooks[i].moduleA,
-                                   g_hooks[i].funcName, g_hooks[i].detour,
-                                   g_hooks[i].original)) {
-                ipc_client_log(PF_LOG_INFO, "IAT-hooked %s successfully",
-                              g_hooks[i].description);
-                status = MH_OK;  /* Treat as success */
-            } else {
-                ipc_client_log(PF_LOG_WARN,
-                    "IAT hook also failed for %s (no imports found)",
-                    g_hooks[i].description);
+    /* ---- Phase 2: Module-wide IAT fallback ------------------------
+     *
+     * MinHook's trampoline generation relies on the HDE64 instruction-
+     * length decoder (circa 2009).  Newer Windows builds of ws2_32.dll
+     * may use instruction patterns that HDE64 mis-decodes WITHOUT
+     * reporting an error — it silently calculates the wrong instruction
+     * length, producing a trampoline whose jump-back lands in the
+     * middle of an instruction (STATUS_ILLEGAL_INSTRUCTION crash).
+     *
+     * If inline hooking failed for ANY function from a given DLL, the
+     * disassembler is unreliable for that DLL build, so ALL functions
+     * from the same DLL may have silently corrupt trampolines.  The
+     * safe response is to remove every inline hook for that module and
+     * fall back to IAT hooking for all of them.
+     */
+
+    /* Collect modules that had at least one inline hook failure */
+    const wchar_t* failed_modules[8] = {};
+    int failed_module_count = 0;
+    for (int i = 0; i < g_hook_count; i++) {
+        if (inline_status[i] != MH_ERROR_UNSUPPORTED_FUNCTION &&
+            inline_status[i] != MH_ERROR_MEMORY_ALLOC)
+            continue;
+
+        /* Check if this module is already recorded */
+        bool found = false;
+        for (int j = 0; j < failed_module_count; j++) {
+            if (wcscmp(failed_modules[j], g_hooks[i].module) == 0) {
+                found = true;
+                break;
             }
         }
+        if (!found && failed_module_count < 8) {
+            failed_modules[failed_module_count++] = g_hooks[i].module;
+        }
+    }
 
-        if (status != MH_OK && status != MH_ERROR_MODULE_NOT_FOUND &&
-            status != MH_ERROR_FUNCTION_NOT_FOUND) {
+    /* For each failed module, tear down all inline hooks and use IAT */
+    for (int m = 0; m < failed_module_count; m++) {
+        ipc_client_log(PF_LOG_WARN,
+            "Inline hooking unreliable for %ls; "
+            "switching ALL hooks for this module to IAT",
+            failed_modules[m]);
+
+        for (int i = 0; i < g_hook_count; i++) {
+            if (wcscmp(g_hooks[i].module, failed_modules[m]) != 0)
+                continue;
+
+            /* Remove inline hook if one was successfully created */
+            if (inline_status[i] == MH_OK) {
+                LPVOID pTarget = get_hook_target(g_hooks[i]);
+                if (pTarget) {
+                    MH_RemoveHook(pTarget);
+                }
+                /* Reset original pointer so IAT fallback can set it
+                 * to the real function via GetProcAddress */
+                *g_hooks[i].original = nullptr;
+                inline_status[i] = MH_ERROR_UNSUPPORTED_FUNCTION;
+
+                ipc_client_log(PF_LOG_DEBUG,
+                    "Removed inline hook for %s (module-wide IAT fallback)",
+                    g_hooks[i].description);
+            }
+
+            /* Log bytes for diagnostics on the ones that triggered this */
+            if (inline_status[i] == MH_ERROR_UNSUPPORTED_FUNCTION ||
+                inline_status[i] == MH_ERROR_MEMORY_ALLOC) {
+                log_function_bytes(g_hooks[i].module, g_hooks[i].funcName,
+                                   g_hooks[i].description);
+            }
+        }
+    }
+
+    /* ---- Phase 3: IAT fallback for every hook that lacks inline --- */
+    for (int i = 0; i < g_hook_count; i++) {
+        MH_STATUS st = inline_status[i];
+        if (st == MH_OK ||
+            st == MH_ERROR_MODULE_NOT_FOUND ||
+            st == MH_ERROR_FUNCTION_NOT_FOUND)
+            continue;
+
+        ipc_client_log(PF_LOG_INFO,
+            "Falling back to IAT hooking for %s",
+            g_hooks[i].description);
+
+        if (iat_hook_function(g_hooks[i].module, g_hooks[i].moduleA,
+                               g_hooks[i].funcName, g_hooks[i].detour,
+                               g_hooks[i].original)) {
+            ipc_client_log(PF_LOG_INFO, "IAT-hooked %s successfully",
+                          g_hooks[i].description);
+            inline_status[i] = MH_OK;  /* Treat as success */
+        } else {
+            ipc_client_log(PF_LOG_WARN,
+                "IAT hook also failed for %s (no imports found)",
+                g_hooks[i].description);
+        }
+    }
+
+    /* ---- Final status check --------------------------------------- */
+    for (int i = 0; i < g_hook_count; i++) {
+        MH_STATUS st = inline_status[i];
+        if (st != MH_OK &&
+            st != MH_ERROR_MODULE_NOT_FOUND &&
+            st != MH_ERROR_FUNCTION_NOT_FOUND) {
             ipc_client_log(PF_LOG_WARN, "Failed to hook %s: %s",
-                          g_hooks[i].description, MH_StatusToString(status));
+                          g_hooks[i].description, MH_StatusToString(st));
             if (g_hooks[i].critical) {
                 all_ok = false;
             }
-        } else if (status == MH_OK) {
-            ipc_client_log(PF_LOG_DEBUG, "Hooked %s", g_hooks[i].description);
-        } else {
-            ipc_client_log(PF_LOG_DEBUG, "Skipped %s (not found)", g_hooks[i].description);
         }
     }
 
@@ -529,14 +636,27 @@ bool install_all_hooks() {
      * it catches ALL callers regardless of how they obtained the pointer
      * (WSAIoctl, cached value, etc.).
      *
+     * If ws2_32.dll was demoted to IAT-only mode above, skip the
+     * direct ConnectEx hook — the WSAIoctl IAT hook will intercept
+     * pointer requests and return Hooked_ConnectEx instead, while
+     * Real_ConnectEx (pre-resolved) provides the pass-through path.
+     *
      * If this inline hook succeeds, Real_ConnectEx is updated to the
      * trampoline so Hooked_ConnectEx can call through to the original.
      * If it fails, the WSAIoctl hook still intercepts pointer requests
      * and returns Hooked_ConnectEx (without calling Original_WSAIoctl,
      * since Real_ConnectEx was already pre-resolved).
      */
+    bool ws2_iat_only = (failed_module_count > 0);
+    for (int m = 0; m < failed_module_count; m++) {
+        if (wcscmp(failed_modules[m], L"ws2_32.dll") == 0) {
+            ws2_iat_only = true;
+            break;
+        }
+    }
+
     LPFN_CONNECTEX real_connectex = get_real_connectex();
-    if (real_connectex) {
+    if (real_connectex && !ws2_iat_only) {
         LPFN_CONNECTEX trampoline = nullptr;
         MH_STATUS cx_status = MH_CreateHook(
             (LPVOID)real_connectex,
@@ -555,6 +675,10 @@ bool install_all_hooks() {
                 "WSAIoctl interception will be used as fallback",
                 MH_StatusToString(cx_status));
         }
+    } else if (real_connectex && ws2_iat_only) {
+        ipc_client_log(PF_LOG_DEBUG,
+            "Skipping direct ConnectEx hook (ws2_32 in IAT-only mode); "
+            "WSAIoctl interception will return Hooked_ConnectEx");
     }
 
     return all_ok;
